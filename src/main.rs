@@ -1,34 +1,16 @@
-use std::thread::{self, JoinHandle};
+mod bus;
+mod memory;
 
-mod clock;
-use clock::{Pulse, Clock};
-
-fn make_thread(pulse: Pulse, message: &'static str) -> JoinHandle<()> {
-    thread::spawn(move || {
-        loop {
-            pulse.on_pulse(|| println!("{}", message));
-        }
-    })
-}
+use bus::Bus;
+use memory::RAM;
 
 fn main() {
-    let mut tick = Clock::new();
-    let mut tock = Clock::new();
+    let mut bus = Bus::<u16, u8>::new();
 
-    let mut tick_threads = Vec::new();
-    tick_threads.push(make_thread(tick.add_tap(), "Tick 1"));
-    tick_threads.push(make_thread(tick.add_tap(), "Tick 2"));
-    tick_threads.push(make_thread(tick.add_tap(), "Tick 3"));
-    
-    let mut tock_threads = Vec::new();
-    tock_threads.push(make_thread(tock.add_tap(), "Tock 1"));
-    tock_threads.push(make_thread(tock.add_tap(), "Tock 2"));
-    tock_threads.push(make_thread(tock.add_tap(), "Tock 3"));
+    let ram = RAM::<u16, u8>::new(1);
+    bus.add_port(ram.map_cb(100), ram.read_cb(), ram.write_cb());
 
-    for _i in 0..2 {
-        println!("Ticking...");
-        tick.start_and_wait();
-        println!("Tocking...");
-        tock.start_and_wait();
-    }
+    bus.write(100, 5);
+    println!("{}", bus.read(100).unwrap());
+    println!("{}", ram.read(0));
 }
