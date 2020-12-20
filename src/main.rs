@@ -1,12 +1,37 @@
 use std::sync::{Arc, RwLock};
 
+mod cpu;
 mod bus;
 mod memory;
 
+use cpu::CPU;
 use bus::{Port, Bus};
 use memory::RAM;
 
 fn main() {
+    // CPU dictates address and data sizes
+    let mut bus = Bus::new();
+
+    // Simple program to write 5 to address 16 (start of RAM)
+    let mut rom = RAM::new(16);
+    rom.write(0, 0x00); // load r0, 5
+    rom.write(1, 5);
+    rom.write(2, 0x10); // store r0, 16
+    rom.write(3, 16);
+    rom.write(4, 0);
+    bus.add_port(0..16, Arc::new(RwLock::new(rom)));
+
+    let ram = Arc::new(RwLock::new(RAM::new(16)));
+    bus.add_port(16..32, ram.clone());
+
+    // Execute 2 instructions
+    let mut cpu = CPU::new(Arc::new(bus));
+    for _i in 0..2 {
+        cpu.tick();
+    }
+
+    let ram = ram.read().unwrap();
+    println!("{}", ram.read(0));
 }
 
 #[test]
