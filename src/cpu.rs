@@ -75,23 +75,80 @@ impl CPU_6502 {
         self.add_carry(left, !right)
     }
 
+    fn read_zero_page_address(&mut self) -> Address {
+        let addr = self.bus.read(self.pc + 1).unwrap() as Address;
+        self.pc += 2;
+        addr
+    }
+
+    fn read_zero_page_x_address(&mut self) -> Address {
+        // Add X to zero page address, wrapping to zero page
+        let base = self.bus.read(self.pc + 1).unwrap() as Address;
+        let addr = (base + self.x as Address) & 0xFF;
+        self.pc += 2;
+        addr
+    }
+
+    fn read_indirect_x_address(&mut self) -> Address {
+        // Add X to zero page address, then read 2-byte address
+        let base = self.bus.read(self.pc + 1).unwrap() as Address;
+        let addr_lo = self.bus.read((base + self.x as Address) & 0xFF).unwrap();
+        let addr_hi = self.bus.read((base + self.x as Address + 1) & 0xFF).unwrap();
+        let addr = addr_lo as Address | ((addr_hi as Address) << 8);
+        self.pc += 2;
+        addr
+    }
+
+    fn read_indirect_y_address(&mut self) -> Address {
+        // Read 2-byte address from zero page, then add Y
+        let base = self.bus.read(self.pc + 1).unwrap() as Address;
+        let addr_lo = self.bus.read(base).unwrap();
+        let addr_hi = self.bus.read((base + 1) & 0xFF).unwrap();
+        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address;
+        self.pc += 2;
+        // TODO add 1 cycle if page boundary crossed
+        addr
+    }
+
+    fn read_absolute_address(&mut self) -> Address {
+        // Read 2-byte absolute address
+        let addr_lo = self.bus.read(self.pc + 1).unwrap();
+        let addr_hi = self.bus.read(self.pc + 2).unwrap();
+        let addr = addr_lo as Address | ((addr_hi as Address) << 8);
+        self.pc += 3;
+        addr
+    }
+
+    fn read_absolute_x_address(&mut self) -> Address {
+        // Add X to absolute address
+        let addr_lo = self.bus.read(self.pc + 1).unwrap();
+        let addr_hi = self.bus.read(self.pc + 2).unwrap();
+        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.x as Address;
+        self.pc += 3;
+        // TODO add 1 cycle if page boundary crossed
+        addr
+    }
+
+    fn read_absolute_y_address(&mut self) -> Address {
+        // Add Y to absolute address
+        let addr_lo = self.bus.read(self.pc + 1).unwrap();
+        let addr_hi = self.bus.read(self.pc + 2).unwrap();
+        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address;
+        self.pc += 3;
+        // TODO add 1 cycle if page boundary crossed
+        addr
+    }
+
     pub fn tick(&mut self) {
         let op = self.bus.read(self.pc).unwrap();
         match op & 0x03 {
             0b01 => {
                 let addr = match (op >> 2) & 0x07 {
                     0b000 => { // Indirect, X
-                        let base = self.bus.read(self.pc + 1).unwrap() as Address;
-                        let addr_lo = self.bus.read((base + self.x as Address) & 0xFF).unwrap();
-                        let addr_hi = self.bus.read((base + self.x as Address + 1) & 0xFF).unwrap();
-                        let addr = addr_lo as Address | ((addr_hi as Address) << 8);
-                        self.pc += 2;
-                        addr
+                        self.read_indirect_x_address()
                     },
                     0b001 => { // Zero Page
-                        let addr = self.bus.read(self.pc + 1).unwrap() as Address;
-                        self.pc += 2;
-                        addr
+                        self.read_zero_page_address()
                     },
                     0b010 => { // Immediate
                         let addr = self.pc + 1;
@@ -99,42 +156,19 @@ impl CPU_6502 {
                         addr
                     },
                     0b011 => { // Absolute
-                        let addr_lo = self.bus.read(self.pc + 1).unwrap();
-                        let addr_hi = self.bus.read(self.pc + 2).unwrap();
-                        let addr = addr_lo as Address | ((addr_hi as Address) << 8);
-                        self.pc += 3;
-                        addr
+                        self.read_absolute_address()
                     },
                     0b100 => { // Indirect, Y
-                        let base = self.bus.read(self.pc + 1).unwrap() as Address;
-                        let addr_lo = self.bus.read(base).unwrap();
-                        let addr_hi = self.bus.read((base + 1) & 0xFF).unwrap();
-                        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address;
-                        self.pc += 2;
-                        // TODO add 1 cycle if page boundary crossed
-                        addr
+                        self.read_indirect_y_address()
                     },
                     0b101 => { // Zero Page, X
-                        let base = self.bus.read(self.pc + 1).unwrap() as Address;
-                        let addr = self.bus.read((base + self.x as Address) & 0xFF).unwrap() as Address;
-                        self.pc += 2;
-                        addr
+                        self.read_zero_page_x_address()
                     },
                     0b110 => { // Absolute, Y
-                        let addr_lo = self.bus.read(self.pc + 1).unwrap() as Address;
-                        let addr_hi = self.bus.read(self.pc + 2).unwrap() as Address;
-                        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address;
-                        self.pc += 3;
-                        // TODO add 1 cycle if page boundary crossed
-                        addr
+                        self.read_absolute_y_address()
                     },
                     0b111 => { // Absolute, X
-                        let addr_lo = self.bus.read(self.pc + 1).unwrap() as Address;
-                        let addr_hi = self.bus.read(self.pc + 2).unwrap() as Address;
-                        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.x as Address;
-                        self.pc += 3;
-                        // TODO add 1 cycle if page boundary crossed
-                        addr
+                        self.read_absolute_x_address()
                     },
                     _ => unreachable!(),
                 };
