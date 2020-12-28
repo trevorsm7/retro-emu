@@ -76,14 +76,14 @@ impl CPU_6502 {
     }
 
     fn read_immediate_data(&mut self) -> Data {
-        let data = self.bus.read(self.pc + 1).unwrap();
-        self.pc += 2;
+        let data = self.bus.read(self.pc).unwrap();
+        self.pc += 1;
         data
     }
 
     fn read_zero_page_address(&mut self) -> Address {
-        let addr = self.bus.read(self.pc + 1).unwrap() as Address;
-        self.pc += 2;
+        let addr = self.bus.read(self.pc).unwrap() as Address;
+        self.pc += 1;
         addr
     }
 
@@ -94,10 +94,8 @@ impl CPU_6502 {
 
     fn read_zero_page_x_address(&mut self) -> Address {
         // Add X to zero page address, wrapping to zero page
-        let base = self.bus.read(self.pc + 1).unwrap() as Address;
-        let addr = (base + self.x as Address) & 0xFF;
-        self.pc += 2;
-        addr
+        let base = self.read_zero_page_address();
+        (base + self.x as Address) & 0xFF
     }
 
     fn read_zero_page_x_data(&mut self) -> Data {
@@ -107,12 +105,10 @@ impl CPU_6502 {
 
     fn read_indirect_x_address(&mut self) -> Address {
         // Add X to zero page address, then read 2-byte address
-        let base = self.bus.read(self.pc + 1).unwrap() as Address;
-        let addr_lo = self.bus.read((base + self.x as Address) & 0xFF).unwrap();
-        let addr_hi = self.bus.read((base + self.x as Address + 1) & 0xFF).unwrap();
-        let addr = addr_lo as Address | ((addr_hi as Address) << 8);
-        self.pc += 2;
-        addr
+        let base = self.read_zero_page_x_address();
+        let addr_lo = self.bus.read(base).unwrap();
+        let addr_hi = self.bus.read((base + 1) & 0xFF).unwrap();
+        addr_lo as Address | ((addr_hi as Address) << 8)
     }
 
     fn read_indirect_x_data(&mut self) -> Data {
@@ -122,13 +118,11 @@ impl CPU_6502 {
 
     fn read_indirect_y_address(&mut self) -> Address {
         // Read 2-byte address from zero page, then add Y
-        let base = self.bus.read(self.pc + 1).unwrap() as Address;
+        let base = self.read_zero_page_address();
         let addr_lo = self.bus.read(base).unwrap();
         let addr_hi = self.bus.read((base + 1) & 0xFF).unwrap();
-        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address;
-        self.pc += 2;
         // TODO add 1 cycle if page boundary crossed
-        addr
+        (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address
     }
 
     fn read_indirect_y_data(&mut self) -> Data {
@@ -138,11 +132,10 @@ impl CPU_6502 {
 
     fn read_absolute_address(&mut self) -> Address {
         // Read 2-byte absolute address
-        let addr_lo = self.bus.read(self.pc + 1).unwrap();
-        let addr_hi = self.bus.read(self.pc + 2).unwrap();
-        let addr = addr_lo as Address | ((addr_hi as Address) << 8);
-        self.pc += 3;
-        addr
+        let addr_lo = self.bus.read(self.pc).unwrap();
+        let addr_hi = self.bus.read(self.pc + 1).unwrap();
+        self.pc += 2;
+        addr_lo as Address | ((addr_hi as Address) << 8)
     }
 
     fn read_absolute_data(&mut self) -> Data {
@@ -151,13 +144,8 @@ impl CPU_6502 {
     }
 
     fn read_absolute_x_address(&mut self) -> Address {
-        // Add X to absolute address
-        let addr_lo = self.bus.read(self.pc + 1).unwrap();
-        let addr_hi = self.bus.read(self.pc + 2).unwrap();
-        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.x as Address;
-        self.pc += 3;
         // TODO add 1 cycle if page boundary crossed
-        addr
+        self.read_absolute_address() + self.x as Address
     }
 
     fn read_absolute_x_data(&mut self) -> Data {
@@ -166,13 +154,8 @@ impl CPU_6502 {
     }
 
     fn read_absolute_y_address(&mut self) -> Address {
-        // Add Y to absolute address
-        let addr_lo = self.bus.read(self.pc + 1).unwrap();
-        let addr_hi = self.bus.read(self.pc + 2).unwrap();
-        let addr = (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address;
-        self.pc += 3;
         // TODO add 1 cycle if page boundary crossed
-        addr
+        self.read_absolute_address() + self.y as Address
     }
 
     fn read_absolute_y_data(&mut self) -> Data {
@@ -182,6 +165,7 @@ impl CPU_6502 {
 
     pub fn tick(&mut self) {
         let op = self.bus.read(self.pc).unwrap();
+        self.pc += 1;
         match op {
             0x69 => { // ADC #Imm
                 let data = self.read_immediate_data();
@@ -372,7 +356,6 @@ impl CPU_6502 {
             // LDY
             // LSR
             0xEA => { // NOP
-                self.pc += 1;
             },
             0x09 => { // ORA #Imm
                 self.a |= self.read_immediate_data();
