@@ -62,9 +62,9 @@ impl CPU_6502 {
     fn add_carry(&mut self, left: Data, right: Data) -> Data {
         // TODO handle decimal mode
         let result = left as u16 + right as u16 + (self.flags & FLAG_C) as u16;
-        self.set_flag((left ^ right) & 0x80 == 0 && (result ^ result >> 1) & 0x80 != 0, FLAG_V);
-        self.set_flag(result & 0x100 != 0, FLAG_C);
+        self.set_flag(result > 0xFF, FLAG_C);
         let result = (result & 0xFF) as Data;
+        self.set_flag((left ^ result) & (right ^ result) & 0x80 != 0, FLAG_V);
         self.update_flags_nz(result);
         result
     }
