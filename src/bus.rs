@@ -65,3 +65,33 @@ impl<Address: PrimInt + std::fmt::Debug, Data: Copy> Bus<Address, Data> {
             port.read().unwrap().read(address))
     }
 }
+
+#[test]
+#[should_panic]
+fn test_mem_overlap_same() {
+    use super::memory::RAM;
+    let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(10)));
+    let mut bus = Bus::<u16, u8>::new();
+    bus.add_port(0..10, ram.clone());
+    bus.add_port(0..10, ram.clone());
+}
+
+#[test]
+#[should_panic]
+fn test_mem_overlap_after() {
+    use super::memory::RAM;
+    let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(10)));
+    let mut bus = Bus::<u16, u8>::new();
+    bus.add_port(0..10, ram.clone());
+    bus.add_port(9..19, ram.clone());
+}
+
+#[test]
+#[should_panic]
+fn test_mem_overlap_before() {
+    use super::memory::RAM;
+    let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(10)));
+    let mut bus = Bus::<u16, u8>::new();
+    bus.add_port(10..20, ram.clone());
+    bus.add_port(1..11, ram.clone());
+}

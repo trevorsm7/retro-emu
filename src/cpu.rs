@@ -1,7 +1,6 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use super::bus::{Port, Bus};
-use super::memory::RAM;
+use super::bus::Bus;
 
 type Address = u16;
 type Data = u8;
@@ -272,4 +271,36 @@ fn test_sub_borrow() {
     assert_eq!(cpu.test_flag(FLAG_V), true); // signed overflow
     assert_eq!(cpu.test_flag(FLAG_Z), false);
     assert_eq!(cpu.test_flag(FLAG_C), false); // borrow set (carry clear)
+}
+
+#[test]
+fn test_program() {
+    use super::memory::RAM;
+    use super::bus::Port;
+    use std::sync::RwLock;
+
+    // CPU dictates address and data sizes
+    let mut bus = Bus::new();
+
+    // Simple program to write 5 to address 16 (start of RAM)
+    let mut rom = RAM::new(16);
+    rom.write(0, 0xA9); // LDA #5
+    rom.write(1, 5);
+    rom.write(2, 0x69); // ADC #3
+    rom.write(3, 3);
+    rom.write(4, 0x85); // STA 16
+    rom.write(5, 16);
+    bus.add_port(0..16, Arc::new(RwLock::new(rom)));
+
+    // Add RAM starting at address 16
+    bus.add_port(16..32, Arc::new(RwLock::new(RAM::new(16))));
+
+    // Execute 3 instructions
+    let bus = Arc::new(bus);
+    let mut cpu = CPU_6502::new(bus.clone());
+    for _i in 0..3 {
+        cpu.tick();
+    }
+
+    assert_eq!(bus.read(16).unwrap(), 8); // 5 + 3 = 8
 }
