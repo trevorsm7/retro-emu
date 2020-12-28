@@ -75,10 +75,21 @@ impl CPU_6502 {
         self.add_carry(left, !right)
     }
 
+    fn read_immediate_data(&mut self) -> Data {
+        let data = self.bus.read(self.pc + 1).unwrap();
+        self.pc += 2;
+        data
+    }
+
     fn read_zero_page_address(&mut self) -> Address {
         let addr = self.bus.read(self.pc + 1).unwrap() as Address;
         self.pc += 2;
         addr
+    }
+
+    fn read_zero_page_data(&mut self) -> Data {
+        let addr = self.read_zero_page_address();
+        self.bus.read(addr).unwrap()
     }
 
     fn read_zero_page_x_address(&mut self) -> Address {
@@ -89,6 +100,11 @@ impl CPU_6502 {
         addr
     }
 
+    fn read_zero_page_x_data(&mut self) -> Data {
+        let addr = self.read_zero_page_x_address();
+        self.bus.read(addr).unwrap()
+    }
+
     fn read_indirect_x_address(&mut self) -> Address {
         // Add X to zero page address, then read 2-byte address
         let base = self.bus.read(self.pc + 1).unwrap() as Address;
@@ -97,6 +113,11 @@ impl CPU_6502 {
         let addr = addr_lo as Address | ((addr_hi as Address) << 8);
         self.pc += 2;
         addr
+    }
+
+    fn read_indirect_x_data(&mut self) -> Data {
+        let addr = self.read_indirect_x_address();
+        self.bus.read(addr).unwrap()
     }
 
     fn read_indirect_y_address(&mut self) -> Address {
@@ -110,6 +131,11 @@ impl CPU_6502 {
         addr
     }
 
+    fn read_indirect_y_data(&mut self) -> Data {
+        let addr = self.read_indirect_y_address();
+        self.bus.read(addr).unwrap()
+    }
+
     fn read_absolute_address(&mut self) -> Address {
         // Read 2-byte absolute address
         let addr_lo = self.bus.read(self.pc + 1).unwrap();
@@ -117,6 +143,11 @@ impl CPU_6502 {
         let addr = addr_lo as Address | ((addr_hi as Address) << 8);
         self.pc += 3;
         addr
+    }
+
+    fn read_absolute_data(&mut self) -> Data {
+        let addr = self.read_absolute_address();
+        self.bus.read(addr).unwrap()
     }
 
     fn read_absolute_x_address(&mut self) -> Address {
@@ -129,6 +160,11 @@ impl CPU_6502 {
         addr
     }
 
+    fn read_absolute_x_data(&mut self) -> Data {
+        let addr = self.read_absolute_x_address();
+        self.bus.read(addr).unwrap()
+    }
+
     fn read_absolute_y_address(&mut self) -> Address {
         // Add Y to absolute address
         let addr_lo = self.bus.read(self.pc + 1).unwrap();
@@ -139,74 +175,318 @@ impl CPU_6502 {
         addr
     }
 
+    fn read_absolute_y_data(&mut self) -> Data {
+        let addr = self.read_absolute_y_address();
+        self.bus.read(addr).unwrap()
+    }
+
     pub fn tick(&mut self) {
         let op = self.bus.read(self.pc).unwrap();
-        match op & 0x03 {
-            0b01 => {
-                let addr = match (op >> 2) & 0x07 {
-                    0b000 => { // Indirect, X
-                        self.read_indirect_x_address()
-                    },
-                    0b001 => { // Zero Page
-                        self.read_zero_page_address()
-                    },
-                    0b010 => { // Immediate
-                        let addr = self.pc + 1;
-                        self.pc += 2;
-                        addr
-                    },
-                    0b011 => { // Absolute
-                        self.read_absolute_address()
-                    },
-                    0b100 => { // Indirect, Y
-                        self.read_indirect_y_address()
-                    },
-                    0b101 => { // Zero Page, X
-                        self.read_zero_page_x_address()
-                    },
-                    0b110 => { // Absolute, Y
-                        self.read_absolute_y_address()
-                    },
-                    0b111 => { // Absolute, X
-                        self.read_absolute_x_address()
-                    },
-                    _ => unreachable!(),
-                };
-                match (op >> 5) & 0x07 {
-                    0b000 => { // ORA
-                        self.a |= self.bus.read(addr).unwrap();
-                        self.update_flags_nz(self.a);
-                    },
-                    0b001 => { // AND
-                        self.a &= self.bus.read(addr).unwrap();
-                        self.update_flags_nz(self.a);
-                    },
-                    0b010 => { // EOR
-                        self.a ^= self.bus.read(addr).unwrap();
-                        self.update_flags_nz(self.a);
-                    },
-                    0b011 => { // ADC
-                        self.a = self.add_carry(self.a, self.bus.read(addr).unwrap());
-                    },
-                    0b100 => { // STA
-                        // NOTE immediate mode STA is illegal and the opcode is used for something else on the 65C02/65C816
-                        self.bus.write(addr, self.a).unwrap();
-                    },
-                    0b101 => { // LDA
-                        self.a = self.bus.read(addr).unwrap();
-                        self.update_flags_nz(self.a);
-                    },
-                    0b110 => { // CMP
-                        self.compare(self.a, self.bus.read(addr).unwrap());
-                    },
-                    0b111 => { // SBC
-                        self.a = self.sub_borrow(self.a, self.bus.read(addr).unwrap());
-                    },
-                    _ => unreachable!(),
-                };
+        match op {
+            0x69 => { // ADC #Imm
+                let data = self.read_immediate_data();
+                self.a = self.add_carry(self.a, data);
             },
-            _ => panic!("unhandled op"),
-        }
+            0x65 => { // ADC ZP
+                let data = self.read_zero_page_data();
+                self.a = self.add_carry(self.a, data);
+            },
+            0x75 => { // ADC ZP, X
+                let data = self.read_zero_page_x_data();
+                self.a = self.add_carry(self.a, data);
+            },
+            0x6D => { // ADC Abs
+                let data = self.read_absolute_data();
+                self.a = self.add_carry(self.a, data);
+            },
+            0x7D => { // ADC Abs, X
+                let data = self.read_absolute_x_data();
+                self.a = self.add_carry(self.a, data);
+            },
+            0x79 => { // ADC Abs, Y
+                let data = self.read_absolute_y_data();
+                self.a = self.add_carry(self.a, data);
+            },
+            0x61 => { // ADC (ZP, X)
+                let data = self.read_indirect_x_data();
+                self.a = self.add_carry(self.a, data);
+            },
+            0x71 => { // ADC (ZP), Y
+                let data = self.read_indirect_y_data();
+                self.a = self.add_carry(self.a, data);
+            },
+            0x29 => { // AND #Imm
+                self.a &= self.read_immediate_data();
+                self.update_flags_nz(self.a);
+            },
+            0x25 => { // AND ZP
+                self.a &= self.read_zero_page_data();
+                self.update_flags_nz(self.a);
+            },
+            0x35 => { // AND ZP, X
+                self.a &= self.read_zero_page_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x2D => { // AND Abs
+                self.a &= self.read_absolute_data();
+                self.update_flags_nz(self.a);
+            },
+            0x3D => { // AND Abs, X
+                self.a &= self.read_absolute_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x39 => { // AND Abs, Y
+                self.a &= self.read_absolute_y_data();
+                self.update_flags_nz(self.a);
+            },
+            0x21 => { // AND (ZP, X)
+                self.a &= self.read_indirect_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x31 => { // AND (ZP), Y
+                self.a &= self.read_indirect_y_data();
+                self.update_flags_nz(self.a);
+            },
+            // ASL
+            // BCC
+            // BCS
+            // BEQ
+            // BIT
+            // BMI
+            // BNE
+            // BPL
+            // BRK
+            // BVC
+            // BVS
+            // CLC
+            // CLD
+            // CLI
+            // CLV
+            0xC9 => { // CMP #Imm
+                let data = self.read_immediate_data();
+                self.compare(self.a, data);
+            },
+            0xC5 => { // CMP ZP
+                let data = self.read_zero_page_data();
+                self.compare(self.a, data);
+            },
+            0xD5 => { // CMP ZP, X
+                let data = self.read_zero_page_x_data();
+                self.compare(self.a, data);
+            },
+            0xCD => { // CMP Abs
+                let data = self.read_absolute_data();
+                self.compare(self.a, data);
+            },
+            0xDD => { // CMP Abs, X
+                let data = self.read_absolute_x_data();
+                self.compare(self.a, data);
+            },
+            0xD9 => { // CMP Abs, Y
+                let data = self.read_absolute_y_data();
+                self.compare(self.a, data);
+            },
+            0xC1 => { // CMP (ZP, X)
+                let data = self.read_indirect_x_data();
+                self.compare(self.a, data);
+            },
+            0xD1 => { // CMP (ZP), Y
+                let data = self.read_indirect_y_data();
+                self.compare(self.a, data);
+            },
+            // CPX
+            // CPY
+            // DEC
+            // DEX
+            // DEY
+            0x49 => { // EOR #Imm
+                self.a ^= self.read_immediate_data();
+                self.update_flags_nz(self.a);
+            },
+            0x45 => { // EOR ZP
+                self.a ^= self.read_zero_page_data();
+                self.update_flags_nz(self.a);
+            },
+            0x55 => { // EOR ZP, X
+                self.a ^= self.read_zero_page_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x4D => { // EOR Abs
+                self.a ^= self.read_absolute_data();
+                self.update_flags_nz(self.a);
+            },
+            0x5D => { // EOR Abs, X
+                self.a ^= self.read_absolute_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x59 => { // EOR Abs, Y
+                self.a ^= self.read_absolute_y_data();
+                self.update_flags_nz(self.a);
+            },
+            0x41 => { // EOR (ZP, X)
+                self.a ^= self.read_indirect_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x51 => { // EOR (ZP), Y
+                self.a ^= self.read_indirect_y_data();
+                self.update_flags_nz(self.a);
+            },
+            // INC
+            // INX
+            // INY
+            // JMP
+            // JSR
+            0xA9 => { // LDA #Imm
+                self.a = self.read_immediate_data();
+                self.update_flags_nz(self.a);
+            },
+            0xA5 => { // LDA ZP
+                self.a = self.read_zero_page_data();
+                self.update_flags_nz(self.a);
+            },
+            0xB5 => { // LDA ZP, X
+                self.a = self.read_zero_page_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0xAD => { // LDA Abs
+                self.a = self.read_absolute_data();
+                self.update_flags_nz(self.a);
+            },
+            0xBD => { // LDA Abs, X
+                self.a = self.read_absolute_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0xB9 => { // LDA Abs, Y
+                self.a = self.read_absolute_y_data();
+                self.update_flags_nz(self.a);
+            },
+            0xA1 => { // LDA (ZP, X)
+                self.a = self.read_indirect_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0xB1 => { // LDA (ZP), Y
+                self.a = self.read_indirect_y_data();
+                self.update_flags_nz(self.a);
+            },
+            // LDX
+            // LDY
+            // LSR
+            0xEA => { // NOP
+                self.pc += 1;
+            },
+            0x09 => { // ORA #Imm
+                self.a |= self.read_immediate_data();
+                self.update_flags_nz(self.a);
+            },
+            0x05 => { // ORA ZP
+                self.a |= self.read_zero_page_data();
+                self.update_flags_nz(self.a);
+            },
+            0x15 => { // ORA ZP, X
+                self.a |= self.read_zero_page_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x0D => { // ORA Abs
+                self.a |= self.read_absolute_data();
+                self.update_flags_nz(self.a);
+            },
+            0x1D => { // ORA Abs, X
+                self.a |= self.read_absolute_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x19 => { // ORA Abs, Y
+                self.a |= self.read_absolute_y_data();
+                self.update_flags_nz(self.a);
+            },
+            0x01 => { // ORA (ZP, X)
+                self.a |= self.read_indirect_x_data();
+                self.update_flags_nz(self.a);
+            },
+            0x11 => { // ORA (ZP), Y
+                self.a |= self.read_indirect_y_data();
+                self.update_flags_nz(self.a);
+            },
+            // PHA
+            // PHP
+            // PLA
+            // PLP
+            // ROL
+            // ROR
+            // RTI
+            // RTS
+            0xE9 => { // SBC #Imm
+                let data = self.read_immediate_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            0xE5 => { // SBC ZP
+                let data = self.read_zero_page_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            0xF5 => { // SBC ZP, X
+                let data = self.read_zero_page_x_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            0xED => { // SBC Abs
+                let data = self.read_absolute_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            0xFD => { // SBC Abs, X
+                let data = self.read_absolute_x_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            0xF9 => { // SBC Abs, Y
+                let data = self.read_absolute_y_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            0xE1 => { // SBC (ZP, X)
+                let data = self.read_indirect_x_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            0xF1 => { // SBC (ZP), Y
+                let data = self.read_indirect_y_data();
+                self.a = self.sub_borrow(self.a, data);
+            },
+            // SEC
+            // SED
+            // SEI
+            0x85 => { // STA ZP
+                let addr = self.read_zero_page_address();
+                self.bus.write(addr, self.a).unwrap();
+            },
+            0x95 => { // STA ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.bus.write(addr, self.a).unwrap();
+            },
+            0x8D => { // STA Abs
+                let addr = self.read_absolute_address();
+                self.bus.write(addr, self.a).unwrap();
+            },
+            0x9D => { // STA Abs, X
+                let addr = self.read_absolute_x_address();
+                self.bus.write(addr, self.a).unwrap();
+            },
+            0x99 => { // STA Abs, Y
+                let addr = self.read_absolute_y_address();
+                self.bus.write(addr, self.a).unwrap();
+            },
+            0x81 => { // STA (ZP, X)
+                let addr = self.read_indirect_x_address();
+                self.bus.write(addr, self.a).unwrap();
+            },
+            0x91 => { // STA (ZP), Y
+                let addr = self.read_indirect_y_address();
+                self.bus.write(addr, self.a).unwrap();
+            },
+            // STX
+            // STY
+            // TAX
+            // TAY
+            // TSX
+            // TXA
+            // TXS
+            // TYA
+            _ => panic!(format!("Illegal opcode {} at address {}", op, self.pc))
+        };
     }
 }
 
