@@ -34,6 +34,8 @@ impl CPU_6502 {
         Self { a, x, y, flags, sp, pc, bus }
     }
 
+    // Stack functions
+
     fn push_data(&mut self, data: Data) {
         self.bus.write(0x100 | self.sp as Address, data);
         self.sp -= 1;
@@ -56,6 +58,8 @@ impl CPU_6502 {
         let addr_hi = self.pop_data();
         addr_lo as Address | ((addr_hi as Address) << 8)
     }
+
+    // Status functions
 
     fn set_flag(&mut self, condition: bool, flag: Data) {
         if condition {
@@ -87,8 +91,11 @@ impl CPU_6502 {
         self.set_flag(left & right == 0, FLAG_Z);
     }
 
+    // Arithmetic functions
+
     fn add_carry(&mut self, left: Data, right: Data) -> Data {
         // TODO handle decimal mode
+        assert_eq!(self.test_flag(FLAG_D), false);
         let result = left as u16 + right as u16 + (self.flags & FLAG_C) as u16;
         self.set_flag(result > 0xFF, FLAG_C);
         let result = (result & 0xFF) as Data;
@@ -99,12 +106,13 @@ impl CPU_6502 {
 
     fn sub_borrow(&mut self, left: Data, right: Data) -> Data {
         // TODO handle decimal mode
+        assert_eq!(self.test_flag(FLAG_D), false);
         // NOTE 1s complement of RHS plus carry is equivalent to 2s complement minus borrow
         self.add_carry(left, !right)
     }
 
     fn increment(&mut self, data: Data) -> Data {
-        let result = data + 1;
+        let result = data.wrapping_add(1);
         self.update_flags_nz(result);
         result
     }
@@ -116,7 +124,7 @@ impl CPU_6502 {
     }
 
     fn decrement(&mut self, data: Data) -> Data {
-        let result = data - 1;
+        let result = data.wrapping_sub(1);
         self.update_flags_nz(result);
         result
     }
@@ -127,59 +135,29 @@ impl CPU_6502 {
         self.bus.write(addr, result);
     }
 
-    fn shift_left(&mut self, mut data: Data) -> Data {
+    fn rotate_left(&mut self, mut data: Data, carry_in: bool) -> Data {
         self.set_flag(data > 0x7F, FLAG_C);
-        data <<= 1;
+        data = (data << 1) | (carry_in as u8);
         self.update_flags_nz(data);
         data
     }
 
-    fn shift_left_mem(&mut self, addr: Address) {
+    fn rotate_left_mem(&mut self, addr: Address, carry_in: bool) {
         let data = self.bus.read(addr).unwrap();
-        let result = self.shift_left(data);
+        let result = self.rotate_left(data, carry_in);
         self.bus.write(addr, result);
     }
 
-    // TODO refactor to shift_left(data, carry_in: bool)
-    fn rotate_left(&mut self, mut data: Data) -> Data {
-        let carry_in = self.flags & FLAG_C;
-        self.set_flag(data > 0x7F, FLAG_C);
-        data = (data << 1) | carry_in;
-        self.update_flags_nz(data);
-        data
-    }
-
-    fn rotate_left_mem(&mut self, addr: Address) {
-        let data = self.bus.read(addr).unwrap();
-        let result = self.rotate_left(data);
-        self.bus.write(addr, result);
-    }
-
-    fn shift_right(&mut self, mut data: Data) -> Data {
+    fn rotate_right(&mut self, mut data: Data, carry_in: bool) -> Data {
         self.set_flag(data & 0x01 > 0, FLAG_C);
-        data >>= 1;
+        data = (data >> 1) | ((carry_in as u8) << 7);
         self.update_flags_nz(data);
         data
     }
 
-    fn shift_right_mem(&mut self, addr: Address) {
+    fn rotate_right_mem(&mut self, addr: Address, carry_in: bool) {
         let data = self.bus.read(addr).unwrap();
-        let result = self.shift_right(data);
-        self.bus.write(addr, result);
-    }
-
-    // TODO refactor to shift_right(data, carry_in: bool)
-    fn rotate_right(&mut self, mut data: Data) -> Data {
-        let carry_in = (self.flags & FLAG_C) << 7;
-        self.set_flag(data & 0x01 > 0, FLAG_C);
-        data = (data >> 1) | carry_in;
-        self.update_flags_nz(data);
-        data
-    }
-
-    fn rotate_right_mem(&mut self, addr: Address) {
-        let data = self.bus.read(addr).unwrap();
-        let result = self.rotate_right(data);
+        let result = self.rotate_right(data, carry_in);
         self.bus.write(addr, result);
     }
 
@@ -189,6 +167,8 @@ impl CPU_6502 {
             self.pc = (self.pc as i16 + rel as i16) as Address;
         }
     }
+
+    // Addressing functions
 
     fn read_immediate_data(&mut self) -> Data {
         let data = self.bus.read(self.pc).unwrap();
@@ -207,53 +187,42 @@ impl CPU_6502 {
         self.bus.read(addr).unwrap()
     }
 
-    fn read_zero_page_x_address(&mut self) -> Address {
-        // Add X to zero page address, wrapping to zero page
+    fn read_indexed_zero_page_address(&mut self, index: Data) -> Address {
+        // Add index to zero page address, wrapping to zero page
         let base = self.read_zero_page_address();
-        (base + self.x as Address) & 0xFF
+        (base + index as Address) & 0xFF
     }
 
-    fn read_zero_page_x_data(&mut self) -> Data {
-        let addr = self.read_zero_page_x_address();
+    fn read_indexed_zero_page_data(&mut self, index: Data) -> Data {
+        let addr = self.read_indexed_zero_page_address(index);
         self.bus.read(addr).unwrap()
     }
 
-    // TODO refactor into read_zero_page_indirect_address(self.y)
-    fn read_zero_page_y_address(&mut self) -> Address {
-        // Add Y to zero page address, wrapping to zero page
-        let base = self.read_zero_page_address();
-        (base + self.y as Address) & 0xFF
-    }
-
-    fn read_zero_page_y_data(&mut self) -> Data {
-        let addr = self.read_zero_page_y_address();
-        self.bus.read(addr).unwrap()
-    }
-
-    fn read_indirect_x_address(&mut self) -> Address {
-        // Add X to zero page address, then read 2-byte address
-        let base = self.read_zero_page_x_address();
+    // OP (ZP, X)
+    fn read_indexed_indirect_address(&mut self, index: Data) -> Address {
+        // Index zero page address, then follow indirect address
+        let base = self.read_indexed_zero_page_address(index);
         let addr_lo = self.bus.read(base).unwrap();
         let addr_hi = self.bus.read((base + 1) & 0xFF).unwrap();
         addr_lo as Address | ((addr_hi as Address) << 8)
     }
 
-    fn read_indirect_x_data(&mut self) -> Data {
-        let addr = self.read_indirect_x_address();
+    fn read_indexed_indirect_data(&mut self, index: Data) -> Data {
+        let addr = self.read_indexed_indirect_address(index);
         self.bus.read(addr).unwrap()
     }
 
-    fn read_indirect_y_address(&mut self) -> Address {
-        // Read 2-byte address from zero page, then add Y
+    // OP (ZP), Y
+    fn read_indirect_indexed_address(&mut self, index: Data) -> Address {
+        // Follow zero page address, then index indirect address
         let base = self.read_zero_page_address();
         let addr_lo = self.bus.read(base).unwrap();
         let addr_hi = self.bus.read((base + 1) & 0xFF).unwrap();
-        // TODO add 1 cycle if page boundary crossed
-        (addr_lo as Address | ((addr_hi as Address) << 8)) + self.y as Address
+        (addr_lo as Address | ((addr_hi as Address) << 8)) + index as Address
     }
 
-    fn read_indirect_y_data(&mut self) -> Data {
-        let addr = self.read_indirect_y_address();
+    fn read_indirect_indexed_data(&mut self, index: Data) -> Data {
+        let addr = self.read_indirect_indexed_address(index);
         self.bus.read(addr).unwrap()
     }
 
@@ -270,32 +239,23 @@ impl CPU_6502 {
         self.bus.read(addr).unwrap()
     }
 
-    fn read_indirect_address(&mut self) -> Address {
+    fn read_absolute_indirect_address(&mut self) -> Address {
         let base = self.read_absolute_address();
         let addr_lo = self.bus.read(base).unwrap();
         let addr_hi = self.bus.read(base + 1).unwrap();
         addr_lo as Address | ((addr_hi as Address) << 8)
     }
 
-    fn read_absolute_x_address(&mut self) -> Address {
-        // TODO add 1 cycle if page boundary crossed
-        self.read_absolute_address() + self.x as Address
+    fn read_indexed_absolute_address(&mut self, index: Data) -> Address {
+        self.read_absolute_address() + index as Address
     }
 
-    fn read_absolute_x_data(&mut self) -> Data {
-        let addr = self.read_absolute_x_address();
+    fn read_indexed_absolute_data(&mut self, index: Data) -> Data {
+        let addr = self.read_indexed_absolute_address(index);
         self.bus.read(addr).unwrap()
     }
 
-    fn read_absolute_y_address(&mut self) -> Address {
-        // TODO add 1 cycle if page boundary crossed
-        self.read_absolute_address() + self.y as Address
-    }
-
-    fn read_absolute_y_data(&mut self) -> Data {
-        let addr = self.read_absolute_y_address();
-        self.bus.read(addr).unwrap()
-    }
+    // Instruction decoding
 
     pub fn tick(&mut self) {
         let op = self.bus.read(self.pc).unwrap();
@@ -310,7 +270,7 @@ impl CPU_6502 {
                 self.a = self.add_carry(self.a, data);
             },
             0x75 => { // ADC ZP, X
-                let data = self.read_zero_page_x_data();
+                let data = self.read_indexed_zero_page_data(self.x);
                 self.a = self.add_carry(self.a, data);
             },
             0x6D => { // ADC Abs
@@ -318,19 +278,19 @@ impl CPU_6502 {
                 self.a = self.add_carry(self.a, data);
             },
             0x7D => { // ADC Abs, X
-                let data = self.read_absolute_x_data();
+                let data = self.read_indexed_absolute_data(self.x);
                 self.a = self.add_carry(self.a, data);
             },
             0x79 => { // ADC Abs, Y
-                let data = self.read_absolute_y_data();
+                let data = self.read_indexed_absolute_data(self.y);
                 self.a = self.add_carry(self.a, data);
             },
             0x61 => { // ADC (ZP, X)
-                let data = self.read_indirect_x_data();
+                let data = self.read_indexed_indirect_data(self.x);
                 self.a = self.add_carry(self.a, data);
             },
             0x71 => { // ADC (ZP), Y
-                let data = self.read_indirect_y_data();
+                let data = self.read_indirect_indexed_data(self.y);
                 self.a = self.add_carry(self.a, data);
             },
             0x29 => { // AND #Imm
@@ -342,7 +302,7 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0x35 => { // AND ZP, X
-                self.a &= self.read_zero_page_x_data();
+                self.a &= self.read_indexed_zero_page_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x2D => { // AND Abs
@@ -350,39 +310,39 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0x3D => { // AND Abs, X
-                self.a &= self.read_absolute_x_data();
+                self.a &= self.read_indexed_absolute_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x39 => { // AND Abs, Y
-                self.a &= self.read_absolute_y_data();
+                self.a &= self.read_indexed_absolute_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0x21 => { // AND (ZP, X)
-                self.a &= self.read_indirect_x_data();
+                self.a &= self.read_indexed_indirect_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x31 => { // AND (ZP), Y
-                self.a &= self.read_indirect_y_data();
+                self.a &= self.read_indirect_indexed_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0x0A => { // ASL A
-                self.a = self.shift_left(self.a);
+                self.a = self.rotate_left(self.a, false);
             },
             0x06 => { // ASL ZP
                 let addr = self.read_zero_page_address();
-                self.shift_left_mem(addr);
+                self.rotate_left_mem(addr, false);
             },
             0x16 => { // ASL ZP, X
-                let addr = self.read_zero_page_x_address();
-                self.shift_left_mem(addr);
+                let addr = self.read_indexed_zero_page_address(self.x);
+                self.rotate_left_mem(addr, false);
             },
             0x0E => { // ASL Abs
                 let addr = self.read_absolute_address();
-                self.shift_left_mem(addr);
+                self.rotate_left_mem(addr, false);
             },
             0x1E => { // ASL Abs, X
-                let addr = self.read_absolute_x_address();
-                self.shift_left_mem(addr);
+                let addr = self.read_indexed_absolute_address(self.x);
+                self.rotate_left_mem(addr, false);
             },
             0x90 => { // BCC Rel
                 self.branch(FLAG_C, false);
@@ -451,7 +411,7 @@ impl CPU_6502 {
                 self.compare(self.a, data);
             },
             0xD5 => { // CMP ZP, X
-                let data = self.read_zero_page_x_data();
+                let data = self.read_indexed_zero_page_data(self.x);
                 self.compare(self.a, data);
             },
             0xCD => { // CMP Abs
@@ -459,19 +419,19 @@ impl CPU_6502 {
                 self.compare(self.a, data);
             },
             0xDD => { // CMP Abs, X
-                let data = self.read_absolute_x_data();
+                let data = self.read_indexed_absolute_data(self.x);
                 self.compare(self.a, data);
             },
             0xD9 => { // CMP Abs, Y
-                let data = self.read_absolute_y_data();
+                let data = self.read_indexed_absolute_data(self.y);
                 self.compare(self.a, data);
             },
             0xC1 => { // CMP (ZP, X)
-                let data = self.read_indirect_x_data();
+                let data = self.read_indexed_indirect_data(self.x);
                 self.compare(self.a, data);
             },
             0xD1 => { // CMP (ZP), Y
-                let data = self.read_indirect_y_data();
+                let data = self.read_indirect_indexed_data(self.y);
                 self.compare(self.a, data);
             },
             0xE0 => { // CPX #Imm
@@ -503,7 +463,7 @@ impl CPU_6502 {
                 self.decrement_mem(addr);
             },
             0xD6 => { // DEC ZP, X
-                let addr = self.read_zero_page_x_address();
+                let addr = self.read_indexed_zero_page_address(self.x);
                 self.decrement_mem(addr);
             },
             0xCE => { // DEC Abs
@@ -511,7 +471,7 @@ impl CPU_6502 {
                 self.decrement_mem(addr);
             },
             0xDE => { // DEC Abs, X
-                let addr = self.read_absolute_x_address();
+                let addr = self.read_indexed_absolute_address(self.x);
                 self.decrement_mem(addr);
             },
             0xCA => { // DEX
@@ -529,7 +489,7 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0x55 => { // EOR ZP, X
-                self.a ^= self.read_zero_page_x_data();
+                self.a ^= self.read_indexed_zero_page_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x4D => { // EOR Abs
@@ -537,19 +497,19 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0x5D => { // EOR Abs, X
-                self.a ^= self.read_absolute_x_data();
+                self.a ^= self.read_indexed_absolute_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x59 => { // EOR Abs, Y
-                self.a ^= self.read_absolute_y_data();
+                self.a ^= self.read_indexed_absolute_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0x41 => { // EOR (ZP, X)
-                self.a ^= self.read_indirect_x_data();
+                self.a ^= self.read_indexed_indirect_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x51 => { // EOR (ZP), Y
-                self.a ^= self.read_indirect_y_data();
+                self.a ^= self.read_indirect_indexed_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0xE6 => { // INC ZP
@@ -557,7 +517,7 @@ impl CPU_6502 {
                 self.increment_mem(addr);
             },
             0xF6 => { // INC ZP, X
-                let addr = self.read_zero_page_x_address();
+                let addr = self.read_indexed_zero_page_address(self.x);
                 self.increment_mem(addr);
             },
             0xEE => { // INC Abs
@@ -565,7 +525,7 @@ impl CPU_6502 {
                 self.increment_mem(addr);
             },
             0xFE => { // INC Abs, X
-                let addr = self.read_absolute_x_address();
+                let addr = self.read_indexed_absolute_address(self.x);
                 self.increment_mem(addr);
             },
             0xE8 => { // INX
@@ -578,7 +538,7 @@ impl CPU_6502 {
                 self.pc = self.read_absolute_address();
             },
             0x6C => { // JMP (Abs)
-                self.pc = self.read_indirect_address();
+                self.pc = self.read_absolute_indirect_address();
             },
             0x20 => { // JSR Abs
                 let addr = self.read_absolute_address();
@@ -595,7 +555,7 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0xB5 => { // LDA ZP, X
-                self.a = self.read_zero_page_x_data();
+                self.a = self.read_indexed_zero_page_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0xAD => { // LDA Abs
@@ -603,19 +563,19 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0xBD => { // LDA Abs, X
-                self.a = self.read_absolute_x_data();
+                self.a = self.read_indexed_absolute_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0xB9 => { // LDA Abs, Y
-                self.a = self.read_absolute_y_data();
+                self.a = self.read_indexed_absolute_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0xA1 => { // LDA (ZP, X)
-                self.a = self.read_indirect_x_data();
+                self.a = self.read_indexed_indirect_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0xB1 => { // LDA (ZP), Y
-                self.a = self.read_indirect_y_data();
+                self.a = self.read_indirect_indexed_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0xA2 => { // LDX #Imm
@@ -627,7 +587,7 @@ impl CPU_6502 {
                 self.update_flags_nz(self.x);
             },
             0xB6 => { // LDX ZP, Y
-                self.x = self.read_zero_page_y_data();
+                self.x = self.read_indexed_zero_page_data(self.y);
                 self.update_flags_nz(self.x);
             },
             0xAE => { // LDX Abs
@@ -635,7 +595,7 @@ impl CPU_6502 {
                 self.update_flags_nz(self.x);
             },
             0xBE => { // LDX Abs, Y
-                self.x = self.read_absolute_y_data();
+                self.x = self.read_indexed_absolute_data(self.y);
                 self.update_flags_nz(self.x);
             },
             0xA0 => { // LDY #Imm
@@ -647,7 +607,7 @@ impl CPU_6502 {
                 self.update_flags_nz(self.y);
             },
             0xB4 => { // LDY ZP, X
-                self.y = self.read_zero_page_x_data();
+                self.y = self.read_indexed_zero_page_data(self.x);
                 self.update_flags_nz(self.y);
             },
             0xAC => { // LDY Abs
@@ -655,27 +615,27 @@ impl CPU_6502 {
                 self.update_flags_nz(self.y);
             },
             0xBC => { // LDY Abs, X
-                self.y = self.read_absolute_x_data();
+                self.y = self.read_indexed_absolute_data(self.x);
                 self.update_flags_nz(self.y);
             },
             0x4A => { // LSR A
-                self.a = self.shift_right(self.a);
+                self.a = self.rotate_right(self.a, false);
             },
             0x46 => { // LSR ZP
                 let addr = self.read_zero_page_address();
-                self.shift_right_mem(addr);
+                self.rotate_right_mem(addr, false);
             },
             0x56 => { // LSR ZP, X
-                let addr = self.read_zero_page_x_address();
-                self.shift_right_mem(addr);
+                let addr = self.read_indexed_zero_page_address(self.x);
+                self.rotate_right_mem(addr, false);
             },
             0x4E => { // LSR Abs
                 let addr = self.read_absolute_address();
-                self.shift_right_mem(addr);
+                self.rotate_right_mem(addr, false);
             },
             0x5E => { // LSR Abs, X
-                let addr = self.read_absolute_x_address();
-                self.shift_right_mem(addr);
+                let addr = self.read_indexed_absolute_address(self.x);
+                self.rotate_right_mem(addr, false);
             },
             0xEA => { // NOP
             },
@@ -688,7 +648,7 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0x15 => { // ORA ZP, X
-                self.a |= self.read_zero_page_x_data();
+                self.a |= self.read_indexed_zero_page_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x0D => { // ORA Abs
@@ -696,19 +656,19 @@ impl CPU_6502 {
                 self.update_flags_nz(self.a);
             },
             0x1D => { // ORA Abs, X
-                self.a |= self.read_absolute_x_data();
+                self.a |= self.read_indexed_absolute_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x19 => { // ORA Abs, Y
-                self.a |= self.read_absolute_y_data();
+                self.a |= self.read_indexed_absolute_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0x01 => { // ORA (ZP, X)
-                self.a |= self.read_indirect_x_data();
+                self.a |= self.read_indexed_indirect_data(self.x);
                 self.update_flags_nz(self.a);
             },
             0x11 => { // ORA (ZP), Y
-                self.a |= self.read_indirect_y_data();
+                self.a |= self.read_indirect_indexed_data(self.y);
                 self.update_flags_nz(self.a);
             },
             0x48 => { // PHA
@@ -727,42 +687,52 @@ impl CPU_6502 {
                 self.flags = self.pop_data();
             },
             0x2A => { // ROL A
-                self.a = self.rotate_left(self.a);
+                let carry_in = self.test_flag(FLAG_C);
+                self.a = self.rotate_left(self.a, carry_in);
             },
             0x26 => { // ROL ZP
                 let addr = self.read_zero_page_address();
-                self.rotate_left_mem(addr);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_left_mem(addr, carry_in);
             },
             0x36 => { // ROL ZP, X
-                let addr = self.read_zero_page_x_address();
-                self.rotate_left_mem(addr);
+                let addr = self.read_indexed_zero_page_address(self.x);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_left_mem(addr, carry_in);
             },
             0x2E => { // ROL Abs
                 let addr = self.read_absolute_address();
-                self.rotate_left_mem(addr);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_left_mem(addr, carry_in);
             },
             0x3E => { // ROL Abs, X
-                let addr = self.read_absolute_x_address();
-                self.rotate_left_mem(addr);
+                let addr = self.read_indexed_absolute_address(self.x);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_left_mem(addr, carry_in);
             },
             0x6A => { // ROR A
-                self.a = self.rotate_right(self.a);
+                let carry_in = self.test_flag(FLAG_C);
+                self.a = self.rotate_right(self.a, carry_in);
             },
             0x66 => { // ROR ZP
                 let addr = self.read_zero_page_address();
-                self.rotate_right_mem(addr);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_right_mem(addr, carry_in);
             },
             0x76 => { // ROR ZP, X
-                let addr = self.read_zero_page_x_address();
-                self.rotate_right_mem(addr);
+                let addr = self.read_indexed_zero_page_address(self.x);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_right_mem(addr, carry_in);
             },
             0x6E => { // ROR Abs
                 let addr = self.read_absolute_address();
-                self.rotate_right_mem(addr);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_right_mem(addr, carry_in);
             },
             0x7E => { // ROR Abs, X
-                let addr = self.read_absolute_x_address();
-                self.rotate_right_mem(addr);
+                let addr = self.read_indexed_absolute_address(self.x);
+                let carry_in = self.test_flag(FLAG_C);
+                self.rotate_right_mem(addr, carry_in);
             },
             0x40 => { // RTI
                 self.flags = self.pop_data();
@@ -781,7 +751,7 @@ impl CPU_6502 {
                 self.a = self.sub_borrow(self.a, data);
             },
             0xF5 => { // SBC ZP, X
-                let data = self.read_zero_page_x_data();
+                let data = self.read_indexed_zero_page_data(self.x);
                 self.a = self.sub_borrow(self.a, data);
             },
             0xED => { // SBC Abs
@@ -789,19 +759,19 @@ impl CPU_6502 {
                 self.a = self.sub_borrow(self.a, data);
             },
             0xFD => { // SBC Abs, X
-                let data = self.read_absolute_x_data();
+                let data = self.read_indexed_absolute_data(self.x);
                 self.a = self.sub_borrow(self.a, data);
             },
             0xF9 => { // SBC Abs, Y
-                let data = self.read_absolute_y_data();
+                let data = self.read_indexed_absolute_data(self.y);
                 self.a = self.sub_borrow(self.a, data);
             },
             0xE1 => { // SBC (ZP, X)
-                let data = self.read_indirect_x_data();
+                let data = self.read_indexed_indirect_data(self.x);
                 self.a = self.sub_borrow(self.a, data);
             },
             0xF1 => { // SBC (ZP), Y
-                let data = self.read_indirect_y_data();
+                let data = self.read_indirect_indexed_data(self.y);
                 self.a = self.sub_borrow(self.a, data);
             },
             0x38 => { // SEC
@@ -818,7 +788,7 @@ impl CPU_6502 {
                 self.bus.write(addr, self.a).unwrap();
             },
             0x95 => { // STA ZP, X
-                let addr = self.read_zero_page_x_address();
+                let addr = self.read_indexed_zero_page_address(self.x);
                 self.bus.write(addr, self.a).unwrap();
             },
             0x8D => { // STA Abs
@@ -826,19 +796,19 @@ impl CPU_6502 {
                 self.bus.write(addr, self.a).unwrap();
             },
             0x9D => { // STA Abs, X
-                let addr = self.read_absolute_x_address();
+                let addr = self.read_indexed_absolute_address(self.x);
                 self.bus.write(addr, self.a).unwrap();
             },
             0x99 => { // STA Abs, Y
-                let addr = self.read_absolute_y_address();
+                let addr = self.read_indexed_absolute_address(self.y);
                 self.bus.write(addr, self.a).unwrap();
             },
             0x81 => { // STA (ZP, X)
-                let addr = self.read_indirect_x_address();
+                let addr = self.read_indexed_indirect_address(self.x);
                 self.bus.write(addr, self.a).unwrap();
             },
             0x91 => { // STA (ZP), Y
-                let addr = self.read_indirect_y_address();
+                let addr = self.read_indirect_indexed_address(self.y);
                 self.bus.write(addr, self.a).unwrap();
             },
             0x86 => { // STX ZP
@@ -846,7 +816,7 @@ impl CPU_6502 {
                 self.bus.write(addr, self.x);
             },
             0x96 => { // STX ZP, Y
-                let addr = self.read_zero_page_y_address();
+                let addr = self.read_indexed_zero_page_address(self.y);
                 self.bus.write(addr, self.x);
             },
             0x8E => { // STX Abs
@@ -858,7 +828,7 @@ impl CPU_6502 {
                 self.bus.write(addr, self.y);
             },
             0x94 => { // STY ZP, X
-                let addr = self.read_zero_page_x_address();
+                let addr = self.read_indexed_zero_page_address(self.x);
                 self.bus.write(addr, self.y);
             },
             0x8C => { // STY Abs
@@ -1098,4 +1068,47 @@ fn test_multiplication() {
     let result_hi = (result >> 8) as u8;
     assert_eq!(bus.read(result_addr_lo as Address).unwrap(), result_lo);
     assert_eq!(cpu.a, result_hi);
+}
+
+#[test]
+fn test_wrapping() {
+    use super::memory::RAM;
+    use super::bus::Port;
+    use std::sync::RwLock;
+
+    let result1 = 200;
+    let result2 = 201;
+    let result3 = 202;
+
+    let ram_size = 512;
+    let mut ram = RAM::new(ram_size);
+    // Test increment/decrement wrapping
+    ram.write(0, 0xA2); // LDX #$FF
+    ram.write(1, 0xFF); // imm
+    ram.write(2, 0xE8); // INX (wrap from 255 to 0)
+    ram.write(3, 0x86); // STX result1
+    ram.write(4, result1); // zp
+    ram.write(5, 0xCA); // DEX (wrap from 0 to 255)
+    ram.write(6, 0x86); // STX result2
+    ram.write(7, result2); // zp
+    // Test zero page indexed wrapping
+    ram.write(8, 0xA9); // LDA #1
+    ram.write(9, 1); // imm
+    ram.write(10, 0xA2); // LDX #result3+1
+    ram.write(11, result3 + 1); // imm
+    ram.write(12, 0x95); // STA -1, X
+    ram.write(13, 255); // zp
+    ram.write(14, 0x00); // BRK
+
+    let mut bus = Bus::new();
+    bus.add_port(0..ram_size, Arc::new(RwLock::new(ram)));
+
+    // Execute until break
+    let bus = Arc::new(bus);
+    let mut cpu = CPU_6502::new(bus.clone());
+    cpu.run_until_break();
+
+    assert_eq!(bus.read(result1 as Address).unwrap(), 0);
+    assert_eq!(bus.read(result2 as Address).unwrap(), 255);
+    assert_eq!(bus.read(result3 as Address).unwrap(), 1);
 }
