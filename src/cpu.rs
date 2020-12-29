@@ -46,6 +46,16 @@ impl CPU_6502 {
         self.bus.read(0x100 | self.sp as Address).unwrap()
     }
 
+    fn push_status(&mut self, interrupt: bool) {
+        // Set bit 5 and conditionally set bit 4 if not an interrupt
+        self.push_data((self.flags & 0xCF) | 0x20 | ((!interrupt) as u8) << 4);
+    }
+
+    fn pop_status(&mut self) {
+        // Clear bits 4 and 5
+        self.flags = self.pop_data() & 0xCF;
+    }
+
     fn push_address(&mut self, addr: Address) {
         let addr_hi = (addr >> 8) as Data;
         let addr_lo = (addr & 0xFF) as Data;
@@ -371,17 +381,18 @@ impl CPU_6502 {
                 self.branch(FLAG_N, false);
             },
             0x00 => { // BRK
-                // NOTE B flag set BEFORE PHP
-                self.set_flag(true, FLAG_B);
                 // NOTE return address skips a byte after BRK
                 self.push_address(self.pc + 1);
-                self.push_data(self.flags);
+                self.push_status(false);
                 self.set_flag(true, FLAG_I);
 
+                // Jump to interrupt vector 0xFFFE
                 //let addr_lo = self.bus.read(0xFFFE).unwrap();
                 //let addr_hi = self.bus.read(0xFFFF).unwrap();
                 //self.pc = addr_lo as Address | ((addr_hi as Address) << 8);
-                // TODO just jumping back to 0 for now
+
+                // TODO until bus ranges are fixed, just jump to 0 and set break flag to stop loop
+                self.set_flag(true, FLAG_B);
                 self.pc = 0;
             },
             0x50 => { // BVC Rel
@@ -675,16 +686,14 @@ impl CPU_6502 {
                 self.push_data(self.a);
             },
             0x08 => { // PHP
-                // TODO may need to modify flags
-                self.push_data(self.flags);
+                self.push_status(false);
             },
             0x68 => { // PLA
                 self.a = self.pop_data();
                 self.update_flags_nz(self.a);
             },
             0x28 => { // PLP
-                // TODO may need to modify flags
-                self.flags = self.pop_data();
+                self.pop_status();
             },
             0x2A => { // ROL A
                 let carry_in = self.test_flag(FLAG_C);
@@ -735,7 +744,7 @@ impl CPU_6502 {
                 self.rotate_right_mem(addr, carry_in);
             },
             0x40 => { // RTI
-                self.flags = self.pop_data();
+                self.pop_status();
                 self.pc = self.pop_address();
             },
             0x60 => { // RTS
