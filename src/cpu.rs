@@ -18,7 +18,7 @@ pub struct CPU_6502 {
     x: Data,
     y: Data,
     flags: Data,
-    stack: Data,
+    sp: Data,
     pc: Address,
     bus: Arc<Bus<Address, Data>>,
 }
@@ -29,9 +29,32 @@ impl CPU_6502 {
         let x = 0;
         let y = 0;
         let flags = 0;
-        let stack = 0xFF;
+        let sp = 0xFF;
         let pc = 0; // TODO what should the initial PC/reset vector be?
-        Self { a, x, y, flags, stack, pc, bus }
+        Self { a, x, y, flags, sp, pc, bus }
+    }
+
+    fn push_data(&mut self, data: Data) {
+        self.bus.write(0x100 | self.sp as Address, data);
+        self.sp -= 1;
+    }
+
+    fn pop_data(&mut self) -> Data {
+        self.sp += 1;
+        self.bus.read(0x100 | self.sp as Address).unwrap()
+    }
+
+    fn push_address(&mut self, addr: Address) {
+        let addr_hi = (addr >> 8) as Data;
+        let addr_lo = (addr & 0xFF) as Data;
+        self.push_data(addr_hi);
+        self.push_data(addr_lo);
+    }
+
+    fn pop_address(&mut self) -> Address {
+        let addr_lo = self.pop_data();
+        let addr_hi = self.pop_data();
+        addr_lo as Address | ((addr_hi as Address) << 8)
     }
 
     fn set_flag(&mut self, condition: bool, flag: Data) {
@@ -59,6 +82,11 @@ impl CPU_6502 {
         self.set_flag(left >= right, FLAG_C);
     }
 
+    fn compare_bits(&mut self, left: Data, right: Data) {
+        self.flags = (self.flags & 0x3F) | (right & 0xC0);
+        self.set_flag(left & right == 0, FLAG_Z);
+    }
+
     fn add_carry(&mut self, left: Data, right: Data) -> Data {
         // TODO handle decimal mode
         let result = left as u16 + right as u16 + (self.flags & FLAG_C) as u16;
@@ -73,6 +101,93 @@ impl CPU_6502 {
         // TODO handle decimal mode
         // NOTE 1s complement of RHS plus carry is equivalent to 2s complement minus borrow
         self.add_carry(left, !right)
+    }
+
+    fn increment(&mut self, data: Data) -> Data {
+        let result = data + 1;
+        self.update_flags_nz(result);
+        result
+    }
+
+    fn increment_mem(&mut self, addr: Address) {
+        let data = self.bus.read(addr).unwrap();
+        let result = self.increment(data);
+        self.bus.write(addr, result);
+    }
+
+    fn decrement(&mut self, data: Data) -> Data {
+        let result = data - 1;
+        self.update_flags_nz(result);
+        result
+    }
+
+    fn decrement_mem(&mut self, addr: Address) {
+        let data = self.bus.read(addr).unwrap();
+        let result = self.decrement(data);
+        self.bus.write(addr, result);
+    }
+
+    fn shift_left(&mut self, mut data: Data) -> Data {
+        self.set_flag(data > 0x7F, FLAG_C);
+        data <<= 1;
+        self.update_flags_nz(data);
+        data
+    }
+
+    fn shift_left_mem(&mut self, addr: Address) {
+        let data = self.bus.read(addr).unwrap();
+        let result = self.shift_left(data);
+        self.bus.write(addr, result);
+    }
+
+    // TODO refactor to shift_left(data, carry_in: bool)
+    fn rotate_left(&mut self, mut data: Data) -> Data {
+        let carry_in = self.flags & FLAG_C;
+        self.set_flag(data > 0x7F, FLAG_C);
+        data = (data << 1) | carry_in;
+        self.update_flags_nz(data);
+        data
+    }
+
+    fn rotate_left_mem(&mut self, addr: Address) {
+        let data = self.bus.read(addr).unwrap();
+        let result = self.rotate_left(data);
+        self.bus.write(addr, result);
+    }
+
+    fn shift_right(&mut self, mut data: Data) -> Data {
+        self.set_flag(data & 0x01 > 0, FLAG_C);
+        data >>= 1;
+        self.update_flags_nz(data);
+        data
+    }
+
+    fn shift_right_mem(&mut self, addr: Address) {
+        let data = self.bus.read(addr).unwrap();
+        let result = self.shift_right(data);
+        self.bus.write(addr, result);
+    }
+
+    // TODO refactor to shift_right(data, carry_in: bool)
+    fn rotate_right(&mut self, mut data: Data) -> Data {
+        let carry_in = (self.flags & FLAG_C) << 7;
+        self.set_flag(data & 0x01 > 0, FLAG_C);
+        data = (data >> 1) | carry_in;
+        self.update_flags_nz(data);
+        data
+    }
+
+    fn rotate_right_mem(&mut self, addr: Address) {
+        let data = self.bus.read(addr).unwrap();
+        let result = self.rotate_right(data);
+        self.bus.write(addr, result);
+    }
+
+    fn branch(&mut self, flag: Data, condition: bool) {
+        let rel = self.read_immediate_data() as i8;
+        if self.test_flag(flag) == condition {
+            self.pc = (self.pc as i16 + rel as i16) as Address;
+        }
     }
 
     fn read_immediate_data(&mut self) -> Data {
@@ -100,6 +215,18 @@ impl CPU_6502 {
 
     fn read_zero_page_x_data(&mut self) -> Data {
         let addr = self.read_zero_page_x_address();
+        self.bus.read(addr).unwrap()
+    }
+
+    // TODO refactor into read_zero_page_indirect_address(self.y)
+    fn read_zero_page_y_address(&mut self) -> Address {
+        // Add Y to zero page address, wrapping to zero page
+        let base = self.read_zero_page_address();
+        (base + self.y as Address) & 0xFF
+    }
+
+    fn read_zero_page_y_data(&mut self) -> Data {
+        let addr = self.read_zero_page_y_address();
         self.bus.read(addr).unwrap()
     }
 
@@ -141,6 +268,13 @@ impl CPU_6502 {
     fn read_absolute_data(&mut self) -> Data {
         let addr = self.read_absolute_address();
         self.bus.read(addr).unwrap()
+    }
+
+    fn read_indirect_address(&mut self) -> Address {
+        let base = self.read_absolute_address();
+        let addr_lo = self.bus.read(base).unwrap();
+        let addr_hi = self.bus.read(base + 1).unwrap();
+        addr_lo as Address | ((addr_hi as Address) << 8)
     }
 
     fn read_absolute_x_address(&mut self) -> Address {
@@ -231,21 +365,83 @@ impl CPU_6502 {
                 self.a &= self.read_indirect_y_data();
                 self.update_flags_nz(self.a);
             },
-            // ASL
-            // BCC
-            // BCS
-            // BEQ
-            // BIT
-            // BMI
-            // BNE
-            // BPL
-            // BRK
-            // BVC
-            // BVS
-            // CLC
-            // CLD
-            // CLI
-            // CLV
+            0x0A => { // ASL A
+                self.a = self.shift_left(self.a);
+            },
+            0x06 => { // ASL ZP
+                let addr = self.read_zero_page_address();
+                self.shift_left_mem(addr);
+            },
+            0x16 => { // ASL ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.shift_left_mem(addr);
+            },
+            0x0E => { // ASL Abs
+                let addr = self.read_absolute_address();
+                self.shift_left_mem(addr);
+            },
+            0x1E => { // ASL Abs, X
+                let addr = self.read_absolute_x_address();
+                self.shift_left_mem(addr);
+            },
+            0x90 => { // BCC Rel
+                self.branch(FLAG_C, false);
+            },
+            0xB0 => { // BCS Rel
+                self.branch(FLAG_C, true);
+            },
+            0xF0 => { // BEQ Rel
+                self.branch(FLAG_Z, true);
+            },
+            0x24 => { // BIT ZP
+                let mask = self.read_zero_page_data();
+                self.compare_bits(self.a, mask);
+            },
+            0x2C => { // BIT Abs
+                let mask = self.read_absolute_data();
+                self.compare_bits(self.a, mask);
+            },
+            0x30 => { // BMI Rel
+                self.branch(FLAG_N, true);
+            },
+            0xD0 => { // BNE Rel
+                self.branch(FLAG_Z, false);
+            },
+            0x10 => { // BPL Rel
+                self.branch(FLAG_N, false);
+            },
+            0x00 => { // BRK
+                // NOTE B flag set BEFORE PHP
+                self.set_flag(true, FLAG_B);
+                // NOTE return address skips a byte after BRK
+                self.push_address(self.pc + 1);
+                self.push_data(self.flags);
+                self.set_flag(true, FLAG_I);
+
+                //let addr_lo = self.bus.read(0xFFFE).unwrap();
+                //let addr_hi = self.bus.read(0xFFFF).unwrap();
+                //self.pc = addr_lo as Address | ((addr_hi as Address) << 8);
+                // TODO just jumping back to 0 for now
+                self.pc = 0;
+            },
+            0x50 => { // BVC Rel
+                self.branch(FLAG_V, false);
+            },
+            0x70 => { // BVS Rel
+                self.branch(FLAG_V, true);
+            },
+            0x18 => { // CLC
+                self.set_flag(false, FLAG_C);
+            },
+            0xD8 => { // CLD
+                self.set_flag(false, FLAG_D);
+            },
+            0x58 => { // CLI
+                self.set_flag(false, FLAG_I);
+            },
+            0xB8 => { // CLV
+                self.set_flag(false, FLAG_V);
+            },
             0xC9 => { // CMP #Imm
                 let data = self.read_immediate_data();
                 self.compare(self.a, data);
@@ -278,11 +474,52 @@ impl CPU_6502 {
                 let data = self.read_indirect_y_data();
                 self.compare(self.a, data);
             },
-            // CPX
-            // CPY
-            // DEC
-            // DEX
-            // DEY
+            0xE0 => { // CPX #Imm
+                let data = self.read_immediate_data();
+                self.compare(self.x, data);
+            },
+            0xE4 => { // CPX ZP
+                let data = self.read_zero_page_data();
+                self.compare(self.x, data);
+            },
+            0xEC => { // CPX Abs
+                let data = self.read_absolute_data();
+                self.compare(self.x, data);
+            },
+            0xC0 => { // CPY #Imm
+                let data = self.read_immediate_data();
+                self.compare(self.y, data);
+            },
+            0xC4 => { // CPY ZP
+                let data = self.read_zero_page_data();
+                self.compare(self.y, data);
+            },
+            0xCC => { // CPY Abs
+                let data = self.read_absolute_data();
+                self.compare(self.y, data);
+            },
+            0xC6 => { // DEC ZP
+                let addr = self.read_zero_page_address();
+                self.decrement_mem(addr);
+            },
+            0xD6 => { // DEC ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.decrement_mem(addr);
+            },
+            0xCE => { // DEC Abs
+                let addr = self.read_absolute_address();
+                self.decrement_mem(addr);
+            },
+            0xDE => { // DEC Abs, X
+                let addr = self.read_absolute_x_address();
+                self.decrement_mem(addr);
+            },
+            0xCA => { // DEX
+                self.x = self.decrement(self.x);
+            },
+            0x88 => { // DEY
+                self.y = self.decrement(self.y);
+            },
             0x49 => { // EOR #Imm
                 self.a ^= self.read_immediate_data();
                 self.update_flags_nz(self.a);
@@ -315,11 +552,40 @@ impl CPU_6502 {
                 self.a ^= self.read_indirect_y_data();
                 self.update_flags_nz(self.a);
             },
-            // INC
-            // INX
-            // INY
-            // JMP
-            // JSR
+            0xE6 => { // INC ZP
+                let addr = self.read_zero_page_address();
+                self.increment_mem(addr);
+            },
+            0xF6 => { // INC ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.increment_mem(addr);
+            },
+            0xEE => { // INC Abs
+                let addr = self.read_absolute_address();
+                self.increment_mem(addr);
+            },
+            0xFE => { // INC Abs, X
+                let addr = self.read_absolute_x_address();
+                self.increment_mem(addr);
+            },
+            0xE8 => { // INX
+                self.x = self.increment(self.x);
+            },
+            0xC8 => { // INY
+                self.y = self.increment(self.y);
+            },
+            0x4C => { // JMP Abs
+                self.pc = self.read_absolute_address();
+            },
+            0x6C => { // JMP (Abs)
+                self.pc = self.read_indirect_address();
+            },
+            0x20 => { // JSR Abs
+                let addr = self.read_absolute_address();
+                // NOTE for some reason JSR pushes PC - 1 rather than PC
+                self.push_address(self.pc - 1);
+                self.pc = addr;
+            },
             0xA9 => { // LDA #Imm
                 self.a = self.read_immediate_data();
                 self.update_flags_nz(self.a);
@@ -352,9 +618,65 @@ impl CPU_6502 {
                 self.a = self.read_indirect_y_data();
                 self.update_flags_nz(self.a);
             },
-            // LDX
-            // LDY
-            // LSR
+            0xA2 => { // LDX #Imm
+                self.x = self.read_immediate_data();
+                self.update_flags_nz(self.x);
+            },
+            0xA6 => { // LDX ZP
+                self.x = self.read_zero_page_data();
+                self.update_flags_nz(self.x);
+            },
+            0xB6 => { // LDX ZP, Y
+                self.x = self.read_zero_page_y_data();
+                self.update_flags_nz(self.x);
+            },
+            0xAE => { // LDX Abs
+                self.x = self.read_absolute_data();
+                self.update_flags_nz(self.x);
+            },
+            0xBE => { // LDX Abs, Y
+                self.x = self.read_absolute_y_data();
+                self.update_flags_nz(self.x);
+            },
+            0xA0 => { // LDY #Imm
+                self.y = self.read_immediate_data();
+                self.update_flags_nz(self.y);
+            },
+            0xA4 => { // LDY ZP
+                self.y = self.read_zero_page_data();
+                self.update_flags_nz(self.y);
+            },
+            0xB4 => { // LDY ZP, X
+                self.y = self.read_zero_page_x_data();
+                self.update_flags_nz(self.y);
+            },
+            0xAC => { // LDY Abs
+                self.y = self.read_absolute_data();
+                self.update_flags_nz(self.y);
+            },
+            0xBC => { // LDY Abs, X
+                self.y = self.read_absolute_x_data();
+                self.update_flags_nz(self.y);
+            },
+            0x4A => { // LSR A
+                self.a = self.shift_right(self.a);
+            },
+            0x46 => { // LSR ZP
+                let addr = self.read_zero_page_address();
+                self.shift_right_mem(addr);
+            },
+            0x56 => { // LSR ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.shift_right_mem(addr);
+            },
+            0x4E => { // LSR Abs
+                let addr = self.read_absolute_address();
+                self.shift_right_mem(addr);
+            },
+            0x5E => { // LSR Abs, X
+                let addr = self.read_absolute_x_address();
+                self.shift_right_mem(addr);
+            },
             0xEA => { // NOP
             },
             0x09 => { // ORA #Imm
@@ -389,14 +711,67 @@ impl CPU_6502 {
                 self.a |= self.read_indirect_y_data();
                 self.update_flags_nz(self.a);
             },
-            // PHA
-            // PHP
-            // PLA
-            // PLP
-            // ROL
-            // ROR
-            // RTI
-            // RTS
+            0x48 => { // PHA
+                self.push_data(self.a);
+            },
+            0x08 => { // PHP
+                // TODO may need to modify flags
+                self.push_data(self.flags);
+            },
+            0x68 => { // PLA
+                self.a = self.pop_data();
+                self.update_flags_nz(self.a);
+            },
+            0x28 => { // PLP
+                // TODO may need to modify flags
+                self.flags = self.pop_data();
+            },
+            0x2A => { // ROL A
+                self.a = self.rotate_left(self.a);
+            },
+            0x26 => { // ROL ZP
+                let addr = self.read_zero_page_address();
+                self.rotate_left_mem(addr);
+            },
+            0x36 => { // ROL ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.rotate_left_mem(addr);
+            },
+            0x2E => { // ROL Abs
+                let addr = self.read_absolute_address();
+                self.rotate_left_mem(addr);
+            },
+            0x3E => { // ROL Abs, X
+                let addr = self.read_absolute_x_address();
+                self.rotate_left_mem(addr);
+            },
+            0x6A => { // ROR A
+                self.a = self.rotate_right(self.a);
+            },
+            0x66 => { // ROR ZP
+                let addr = self.read_zero_page_address();
+                self.rotate_right_mem(addr);
+            },
+            0x76 => { // ROR ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.rotate_right_mem(addr);
+            },
+            0x6E => { // ROR Abs
+                let addr = self.read_absolute_address();
+                self.rotate_right_mem(addr);
+            },
+            0x7E => { // ROR Abs, X
+                let addr = self.read_absolute_x_address();
+                self.rotate_right_mem(addr);
+            },
+            0x40 => { // RTI
+                self.flags = self.pop_data();
+                self.pc = self.pop_address();
+            },
+            0x60 => { // RTS
+                // NOTE JSR pushes PC - 1, so need to add 1
+                self.pc = self.pop_address() + 1;
+            },
             0xE9 => { // SBC #Imm
                 let data = self.read_immediate_data();
                 self.a = self.sub_borrow(self.a, data);
@@ -429,9 +804,15 @@ impl CPU_6502 {
                 let data = self.read_indirect_y_data();
                 self.a = self.sub_borrow(self.a, data);
             },
-            // SEC
-            // SED
-            // SEI
+            0x38 => { // SEC
+                self.set_flag(true, FLAG_C);
+            },
+            0xF8 => { // SED
+                self.set_flag(true, FLAG_D);
+            },
+            0x78 => { // SEI
+                self.set_flag(true, FLAG_I);
+            },
             0x85 => { // STA ZP
                 let addr = self.read_zero_page_address();
                 self.bus.write(addr, self.a).unwrap();
@@ -460,16 +841,62 @@ impl CPU_6502 {
                 let addr = self.read_indirect_y_address();
                 self.bus.write(addr, self.a).unwrap();
             },
-            // STX
-            // STY
-            // TAX
-            // TAY
-            // TSX
-            // TXA
-            // TXS
-            // TYA
+            0x86 => { // STX ZP
+                let addr = self.read_zero_page_address();
+                self.bus.write(addr, self.x);
+            },
+            0x96 => { // STX ZP, Y
+                let addr = self.read_zero_page_y_address();
+                self.bus.write(addr, self.x);
+            },
+            0x8E => { // STX Abs
+                let addr = self.read_absolute_address();
+                self.bus.write(addr, self.x);
+            },
+            0x84 => { // STY ZP
+                let addr = self.read_zero_page_address();
+                self.bus.write(addr, self.y);
+            },
+            0x94 => { // STY ZP, X
+                let addr = self.read_zero_page_x_address();
+                self.bus.write(addr, self.y);
+            },
+            0x8C => { // STY Abs
+                let addr = self.read_absolute_address();
+                self.bus.write(addr, self.y);
+            },
+            0xAA => { // TAX
+                self.x = self.a;
+                self.update_flags_nz(self.x);
+            },
+            0xA8 => { // TAY
+                self.y = self.a;
+                self.update_flags_nz(self.y);
+            },
+            0xBA => { // TSX
+                self.x = self.sp;
+                self.update_flags_nz(self.x);
+            },
+            0x8A => { // TXA
+                self.a = self.x;
+                self.update_flags_nz(self.a);
+            },
+            0x9A => { // TXS
+                self.sp = self.x;
+                // NOTE does NOT update N and Z flags
+            },
+            0x98 => { // TYA
+                self.a = self.y;
+                self.update_flags_nz(self.a);
+            },
             _ => panic!(format!("Illegal opcode {} at address {}", op, self.pc))
         };
+    }
+
+    pub fn run_until_break(&mut self) {
+        while !self.test_flag(FLAG_B) {
+            self.tick();
+        }
     }
 }
 
@@ -571,7 +998,7 @@ fn test_sub_borrow() {
 }
 
 #[test]
-fn test_program() {
+fn test_lda_adc_sta() {
     use super::memory::RAM;
     use super::bus::Port;
     use std::sync::RwLock;
@@ -579,14 +1006,18 @@ fn test_program() {
     // CPU dictates address and data sizes
     let mut bus = Bus::new();
 
-    // Simple program to write 5 to address 16 (start of RAM)
+    let lhs = 5;
+    let rhs = 3;
+
+    // Add two immediate values and store result to address 16 (start of RAM)
     let mut rom = RAM::new(16);
     rom.write(0, 0xA9); // LDA #5
-    rom.write(1, 5);
+    rom.write(1, lhs);
     rom.write(2, 0x69); // ADC #3
-    rom.write(3, 3);
+    rom.write(3, rhs);
     rom.write(4, 0x85); // STA 16
     rom.write(5, 16);
+    rom.write(6, 0x00); // BRK
     bus.add_port(0..16, Arc::new(RwLock::new(rom)));
 
     // Add RAM starting at address 16
@@ -595,9 +1026,76 @@ fn test_program() {
     // Execute 3 instructions
     let bus = Arc::new(bus);
     let mut cpu = CPU_6502::new(bus.clone());
-    for _i in 0..3 {
-        cpu.tick();
-    }
+    cpu.run_until_break();
 
-    assert_eq!(bus.read(16).unwrap(), 8); // 5 + 3 = 8
+    assert_eq!(bus.read(16).unwrap(), lhs + rhs);
+}
+
+#[test]
+fn test_multiplication() {
+    use super::memory::RAM;
+    use super::bus::Port;
+    use std::sync::RwLock;
+
+    // CPU dictates address and data sizes
+    let mut bus = Bus::new();
+
+    // Multiplication routine from "Programming the 6502"
+    let multiplier = 15;
+    let multiplicand = 43;
+
+    let result_addr_lo = 64;
+    let multiplier_addr = 65;
+    let multiplicand_addr = 66;
+
+    let ram_size = 512;
+    let mut ram = RAM::new(ram_size);
+    ram.write(0, 0xA9); // LDA #multiplier
+    ram.write(1, multiplier); // imm
+    ram.write(2, 0x85); // STA multiplier
+    ram.write(3, multiplier_addr); // zp
+    ram.write(4, 0xA9); // LDA #multiplicand
+    ram.write(5, multiplicand); // imm
+    ram.write(6, 0x85); // STA multiplicand
+    ram.write(7, multiplicand_addr); // zp
+    ram.write(8, 0x20); // JSR MULT
+    ram.write(9, 12); // abs lo
+    ram.write(10, 0); // abs hi
+    ram.write(11, 0x00); // BRK
+    // MULT:
+    ram.write(12, 0xA9); // LDA #0
+    ram.write(13, 0); // imm
+    ram.write(14, 0x85); // STA result_lo
+    ram.write(15, result_addr_lo); // zp
+    ram.write(16, 0xA2); // LDX #8
+    ram.write(17, 8); // imm
+    // LOOP:
+    ram.write(18, 0x46); // LSR multiplier
+    ram.write(19, multiplier_addr); // zp
+    ram.write(20, 0x90); // BCC NOADD
+    ram.write(21, (25i8 - 22i8) as u8); // rel
+    ram.write(22, 0x18); // CLC
+    ram.write(23, 0x65); // ADC multiplicand
+    ram.write(24, multiplicand_addr); // zp
+    // NOADD:
+    ram.write(25, 0x6A); // ROR A (result_hi)
+    ram.write(26, 0x66); // ROR result_lo
+    ram.write(27, result_addr_lo); // zp
+    ram.write(28, 0xCA); // DEX
+    ram.write(29, 0xD0); // BNE LOOP
+    ram.write(30, (18i8 - 31i8) as u8); // rel
+    ram.write(31, 0x60); // RTS
+    bus.add_port(0..ram_size, Arc::new(RwLock::new(ram)));
+
+    // Execute until break
+    let bus = Arc::new(bus);
+    let mut cpu = CPU_6502::new(bus.clone());
+    cpu.run_until_break();
+
+    // Evaluate result
+    let result = multiplicand as u16 * multiplier as u16;
+    let result_lo = (result & 0xFF) as u8;
+    let result_hi = (result >> 8) as u8;
+    assert_eq!(bus.read(result_addr_lo as Address).unwrap(), result_lo);
+    assert_eq!(cpu.a, result_hi);
 }
