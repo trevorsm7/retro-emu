@@ -34,9 +34,8 @@ fn test_mem_rw() {
     let mut bus = Bus::<u16, u8>::new();
 
     let addr = 100;
-    let size = 1;
-    let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(size)));
-    bus.add_port(addr..addr+size, ram.clone());
+    let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(1)));
+    bus.add_port(addr, ram.clone());
 
     let value = 5;
     bus.write(addr, value);

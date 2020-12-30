@@ -20,10 +20,10 @@ fn main() {
     rom.write(3, 3);
     rom.write(4, 0x85); // STA 16
     rom.write(5, 16);
-    bus.add_port(0..16, Arc::new(RwLock::new(rom)));
+    bus.add_port(0, Arc::new(RwLock::new(rom)));
 
     let ram = Arc::new(RwLock::new(RAM::new(16)));
-    bus.add_port(16..32, ram.clone());
+    bus.add_port(16, ram.clone());
 
     // Execute 3 instructions
     let mut cpu = CPU_6502::new(Arc::new(bus));

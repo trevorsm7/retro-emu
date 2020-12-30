@@ -1,5 +1,4 @@
 use std::sync::{Arc, RwLock};
-use std::ops::Range;
 
 use num_traits::PrimInt;
 
@@ -11,7 +10,7 @@ pub trait Port<Address, Data> {
 type PortPtr<Address, Data> = Arc<RwLock<dyn Port<Address, Data>>>;
 
 struct PortMap<Address, Data> {
-    range: Range<Address>,
+    address: Address,
     port: PortPtr<Address, Data>,
 }
 
@@ -25,32 +24,20 @@ impl<Address: PrimInt + std::fmt::Debug, Data: Copy> Bus<Address, Data> {
     }
 
     // TODO return an error instead of panicking
-    pub fn add_port(&mut self, range: Range<Address>, port: PortPtr<Address, Data>) {
-        match self.ports.binary_search_by_key(&range.start, |port| port.range.start) {
-            Err(index) => {
-                if index > 0 && self.ports[index - 1].range.end > range.start {
-                    panic!(format!("address range {:?} overlaps with {:?}", range, self.ports[index - 1].range));
-                }
-                if index < self.ports.len() && self.ports[index].range.start < range.end {
-                    panic!(format!("address range {:?} overlaps with {:?}", range, self.ports[index].range));
-                }
-                self.ports.insert(index, PortMap { range, port });
-            },
-            Ok(index) => panic!(format!("address range {:?} overlaps with {:?}", range, self.ports[index].range)),
+    pub fn add_port(&mut self, address: Address, port: PortPtr<Address, Data>) {
+        match self.ports.binary_search_by_key(&address, |port| port.address) {
+            Err(index) => self.ports.insert(index, PortMap { address, port }),
+            Ok(_) => panic!(format!("address {:?} already assigned", address)),
         }
     }
 
     fn map_address(&self, address: Address) -> Option<(&PortPtr<Address, Data>, Address)> {
-        match self.ports.binary_search_by_key(&address, |port| port.range.start) {
+        match self.ports.binary_search_by_key(&address, |port| port.address) {
             Ok(index) => Some((&self.ports[index].port, Address::zero())),
+            Err(0) => None,
             Err(index) => {
-                if index > 0 {
-                    let prev = &self.ports[index - 1];
-                    if prev.range.contains(&address) {
-                        return Some((&prev.port, address - prev.range.start));
-                    }
-                }
-                None
+                let prev = &self.ports[index - 1];
+                Some((&prev.port, address - prev.address))
             },
         }
     }
@@ -72,26 +59,6 @@ fn test_mem_overlap_same() {
     use super::memory::RAM;
     let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(10)));
     let mut bus = Bus::<u16, u8>::new();
-    bus.add_port(0..10, ram.clone());
-    bus.add_port(0..10, ram.clone());
-}
-
-#[test]
-#[should_panic]
-fn test_mem_overlap_after() {
-    use super::memory::RAM;
-    let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(10)));
-    let mut bus = Bus::<u16, u8>::new();
-    bus.add_port(0..10, ram.clone());
-    bus.add_port(9..19, ram.clone());
-}
-
-#[test]
-#[should_panic]
-fn test_mem_overlap_before() {
-    use super::memory::RAM;
-    let ram = Arc::new(RwLock::new(RAM::<u16, u8>::new(10)));
-    let mut bus = Bus::<u16, u8>::new();
-    bus.add_port(10..20, ram.clone());
-    bus.add_port(1..11, ram.clone());
+    bus.add_port(0, ram.clone());
+    bus.add_port(0, ram.clone());
 }

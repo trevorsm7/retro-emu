@@ -37,7 +37,7 @@ impl CPU_6502 {
     // Stack functions
 
     fn push_data(&mut self, data: Data) {
-        self.bus.write(0x100 | self.sp as Address, data);
+        self.bus.write(0x100 | self.sp as Address, data).unwrap();
         self.sp -= 1;
     }
 
@@ -987,27 +987,25 @@ fn test_lda_adc_sta() {
 
     let lhs = 5;
     let rhs = 3;
+    let result_addr = 16;
 
-    // Add two immediate values and store result to address 16 (start of RAM)
-    let mut rom = RAM::new(16);
+    // Add two immediate values and store result to address 16
+    let mut rom = RAM::new(512);
     rom.write(0, 0xA9); // LDA #5
     rom.write(1, lhs);
     rom.write(2, 0x69); // ADC #3
     rom.write(3, rhs);
     rom.write(4, 0x85); // STA 16
-    rom.write(5, 16);
+    rom.write(5, result_addr as u8);
     rom.write(6, 0x00); // BRK
-    bus.add_port(0..16, Arc::new(RwLock::new(rom)));
-
-    // Add RAM starting at address 16
-    bus.add_port(16..32, Arc::new(RwLock::new(RAM::new(16))));
+    bus.add_port(0, Arc::new(RwLock::new(rom)));
 
     // Execute 3 instructions
     let bus = Arc::new(bus);
     let mut cpu = CPU_6502::new(bus.clone());
     cpu.run_until_break();
 
-    assert_eq!(bus.read(16).unwrap(), lhs + rhs);
+    assert_eq!(bus.read(result_addr).unwrap(), lhs + rhs);
 }
 
 #[test]
@@ -1064,7 +1062,7 @@ fn test_multiplication() {
     ram.write(29, 0xD0); // BNE LOOP
     ram.write(30, (18i8 - 31i8) as u8); // rel
     ram.write(31, 0x60); // RTS
-    bus.add_port(0..ram_size, Arc::new(RwLock::new(ram)));
+    bus.add_port(0, Arc::new(RwLock::new(ram)));
 
     // Execute until break
     let bus = Arc::new(bus);
@@ -1110,7 +1108,7 @@ fn test_wrapping() {
     ram.write(14, 0x00); // BRK
 
     let mut bus = Bus::new();
-    bus.add_port(0..ram_size, Arc::new(RwLock::new(ram)));
+    bus.add_port(0, Arc::new(RwLock::new(ram)));
 
     // Execute until break
     let bus = Arc::new(bus);
