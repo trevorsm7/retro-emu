@@ -37,41 +37,63 @@ impl CPU_6502 {
     // Stack functions
 
     fn push_data(&mut self, data: Data) {
-        self.bus.write(0x100 | self.sp as Address, data).unwrap();
+        let stack_page = 0x100;
+        self.bus.write(stack_page | self.sp as Address, data).unwrap();
         self.sp -= 1;
     }
 
     fn pop_data(&mut self) -> Data {
         self.sp += 1;
-        self.bus.read(0x100 | self.sp as Address).unwrap()
+        let stack_page = 0x100;
+        self.bus.read(stack_page | self.sp as Address).unwrap()
     }
 
     fn push_status(&mut self, interrupt: bool) {
         // Set bit 5 and conditionally set bit 4 if not an interrupt
-        self.push_data((self.flags & 0xCF) | 0x20 | ((!interrupt) as u8) << 4);
+        let mask = 0b1100_1111;
+        let set = 0x20 | ((!interrupt) as u8) << 4;
+        self.push_data((self.flags & mask) | set);
     }
 
     fn pop_status(&mut self) {
         // Clear bits 4 and 5
-        self.flags = self.pop_data() & 0xCF;
+        let mask = 0b1100_1111;
+        self.flags = self.pop_data() & mask;
     }
 
     fn push_address(&mut self, addr: Address) {
-        let addr_hi = (addr >> 8) as Data;
-        let addr_lo = (addr & 0xFF) as Data;
-        self.push_data(addr_hi);
-        self.push_data(addr_lo);
+        if cfg!(target_endian = "little") {
+            let bytes = addr.to_le_bytes();
+            self.push_data(bytes[1]); //< push high byte
+            self.push_data(bytes[0]); //< push low byte
+        } else if cfg!(target_endian = "big") {
+            let bytes = addr.to_be_bytes();
+            self.push_data(bytes[0]); //< push high byte
+            self.push_data(bytes[1]); //< push low byte
+        } else {
+            unreachable!();
+        }
     }
 
     fn pop_address(&mut self) -> Address {
-        let addr_lo = self.pop_data();
-        let addr_hi = self.pop_data();
-        addr_lo as Address | ((addr_hi as Address) << 8)
+        if cfg!(target_endian = "little") {
+            let mut bytes = [0; 2];
+            bytes[0] = self.pop_data(); //< pop low byte
+            bytes[1] = self.pop_data(); //< pop high byte
+            u16::from_le_bytes(bytes)
+        } else if cfg!(target_endian = "big") {
+            let mut bytes = [0; 2];
+            bytes[1] = self.pop_data(); //< pop low byte
+            bytes[0] = self.pop_data(); //< pop high byte
+            u16::from_be_bytes(bytes)
+        } else {
+            unreachable!();
+        }
     }
 
     // Status functions
 
-    fn set_flag(&mut self, condition: bool, flag: Data) {
+    fn set_flag(&mut self, flag: Data, condition: bool) {
         if condition {
             self.flags |= flag;
         } else {
@@ -86,32 +108,51 @@ impl CPU_6502 {
     }
 
     fn update_flags_nz(&mut self, data: Data) {
-        self.set_flag(data & 0x80 != 0, FLAG_N);
-        self.set_flag(data == 0, FLAG_Z);
+        self.set_flag(FLAG_N, data & 0x80 != 0);
+        self.set_flag(FLAG_Z, data == 0);
     }
 
     fn compare(&mut self, left: Data, right: Data) {
-        self.set_flag(left < right, FLAG_N);
-        self.set_flag(left == right, FLAG_Z);
-        self.set_flag(left >= right, FLAG_C);
+        self.set_flag(FLAG_N, left < right);
+        self.set_flag(FLAG_Z, left == right);
+        self.set_flag(FLAG_C, left >= right);
     }
 
     fn compare_bits(&mut self, left: Data, right: Data) {
-        self.flags = (self.flags & 0x3F) | (right & 0xC0);
-        self.set_flag(left & right == 0, FLAG_Z);
+        // Set the N and V flags from bits 7 and 6 of the tested address
+        self.flags = (self.flags & 0b0011_1111) | (right & 0b1100_0000);
+        self.set_flag(FLAG_Z, left & right == 0);
+    }
+
+    fn branch(&mut self, flag: Data, condition: bool) {
+        let rel = self.read_immediate_data() as i8;
+        if self.test_flag(flag) == condition {
+            // TODO verify this is correct when bit 15 of PC is set
+            self.pc = (self.pc as i16 + rel as i16) as Address;
+        }
     }
 
     // Arithmetic functions
 
     fn add_carry(&mut self, left: Data, right: Data) -> Data {
-        // TODO handle decimal mode
-        assert_eq!(self.test_flag(FLAG_D), false);
-        let result = left as u16 + right as u16 + (self.flags & FLAG_C) as u16;
-        self.set_flag(result > 0xFF, FLAG_C);
-        let result = (result & 0xFF) as Data;
-        self.set_flag((left ^ result) & (right ^ result) & 0x80 != 0, FLAG_V);
-        self.update_flags_nz(result);
-        result
+        let sum = if self.test_flag(FLAG_D) {
+            unimplemented!("TODO Decimal mode unimplemented");
+        } else {
+            let sum = left as u16 + right as u16 + (self.flags & FLAG_C) as u16;
+
+            // Set carry flag from bit 9 and wrap to 8 bits
+            self.set_flag(FLAG_C, sum > 0xFF);
+            (sum & 0xFF) as Data
+        };
+
+        // TODO it seems that the N and V flags are set incorrectly in BCD mode due to HW bug
+
+        // Compute overflow (carry in xor carry out of bit 7)
+        let overflow = (left ^ sum) & (right ^ sum) & 0x80 != 0;
+        self.set_flag(FLAG_V, overflow);
+
+        self.update_flags_nz(sum);
+        sum
     }
 
     fn sub_borrow(&mut self, left: Data, right: Data) -> Data {
@@ -128,8 +169,8 @@ impl CPU_6502 {
     }
 
     fn increment_mem(&mut self, addr: Address) {
-        let data = self.bus.read(addr).unwrap();
-        let result = self.increment(data);
+        let input = self.bus.read(addr).unwrap();
+        let result = self.increment(input);
         self.bus.write(addr, result);
     }
 
@@ -140,42 +181,35 @@ impl CPU_6502 {
     }
 
     fn decrement_mem(&mut self, addr: Address) {
-        let data = self.bus.read(addr).unwrap();
-        let result = self.decrement(data);
+        let input = self.bus.read(addr).unwrap();
+        let result = self.decrement(input);
         self.bus.write(addr, result);
     }
 
-    fn rotate_left(&mut self, mut data: Data, carry_in: bool) -> Data {
-        self.set_flag(data > 0x7F, FLAG_C);
-        data = (data << 1) | (carry_in as u8);
-        self.update_flags_nz(data);
-        data
+    fn rotate_left(&mut self, input: Data, carry_in: bool) -> Data {
+        self.set_flag(FLAG_C, input > 0x7F);
+        let result = (input << 1) | (carry_in as u8);
+        self.update_flags_nz(result);
+        result
     }
 
     fn rotate_left_mem(&mut self, addr: Address, carry_in: bool) {
-        let data = self.bus.read(addr).unwrap();
-        let result = self.rotate_left(data, carry_in);
+        let input = self.bus.read(addr).unwrap();
+        let result = self.rotate_left(input, carry_in);
         self.bus.write(addr, result);
     }
 
-    fn rotate_right(&mut self, mut data: Data, carry_in: bool) -> Data {
-        self.set_flag(data & 0x01 > 0, FLAG_C);
-        data = (data >> 1) | ((carry_in as u8) << 7);
-        self.update_flags_nz(data);
-        data
+    fn rotate_right(&mut self, input: Data, carry_in: bool) -> Data {
+        self.set_flag(FLAG_C, input & 0x01 != 0);
+        let result = (input >> 1) | ((carry_in as u8) << 7);
+        self.update_flags_nz(result);
+        result
     }
 
     fn rotate_right_mem(&mut self, addr: Address, carry_in: bool) {
-        let data = self.bus.read(addr).unwrap();
-        let result = self.rotate_right(data, carry_in);
+        let input = self.bus.read(addr).unwrap();
+        let result = self.rotate_right(input, carry_in);
         self.bus.write(addr, result);
-    }
-
-    fn branch(&mut self, flag: Data, condition: bool) {
-        let rel = self.read_immediate_data() as i8;
-        if self.test_flag(flag) == condition {
-            self.pc = (self.pc as i16 + rel as i16) as Address;
-        }
     }
 
     // Addressing functions
@@ -384,7 +418,7 @@ impl CPU_6502 {
                 // NOTE return address skips a byte after BRK
                 self.push_address(self.pc + 1);
                 self.push_status(false);
-                self.set_flag(true, FLAG_I);
+                self.set_flag(FLAG_I, true);
 
                 // Jump to interrupt vector 0xFFFE
                 //let addr_lo = self.bus.read(0xFFFE).unwrap();
@@ -392,7 +426,7 @@ impl CPU_6502 {
                 //self.pc = addr_lo as Address | ((addr_hi as Address) << 8);
 
                 // TODO until bus ranges are fixed, just jump to 0 and set break flag to stop loop
-                self.set_flag(true, FLAG_B);
+                self.set_flag(FLAG_B, true);
                 self.pc = 0;
             },
             0x50 => { // BVC Rel
@@ -402,16 +436,16 @@ impl CPU_6502 {
                 self.branch(FLAG_V, true);
             },
             0x18 => { // CLC
-                self.set_flag(false, FLAG_C);
+                self.set_flag(FLAG_C, false);
             },
             0xD8 => { // CLD
-                self.set_flag(false, FLAG_D);
+                self.set_flag(FLAG_D, false);
             },
             0x58 => { // CLI
-                self.set_flag(false, FLAG_I);
+                self.set_flag(FLAG_I, false);
             },
             0xB8 => { // CLV
-                self.set_flag(false, FLAG_V);
+                self.set_flag(FLAG_V, false);
             },
             0xC9 => { // CMP #Imm
                 let data = self.read_immediate_data();
@@ -784,13 +818,13 @@ impl CPU_6502 {
                 self.a = self.sub_borrow(self.a, data);
             },
             0x38 => { // SEC
-                self.set_flag(true, FLAG_C);
+                self.set_flag(FLAG_C, true);
             },
             0xF8 => { // SED
-                self.set_flag(true, FLAG_D);
+                self.set_flag(FLAG_D, true);
             },
             0x78 => { // SEI
-                self.set_flag(true, FLAG_I);
+                self.set_flag(FLAG_I, true);
             },
             0x85 => { // STA ZP
                 let addr = self.read_zero_page_address();
@@ -906,7 +940,7 @@ fn test_add_carry() {
     let mut cpu = CPU_6502::new(Arc::new(bus));
 
     // Unsigned overflow (carry out)
-    cpu.set_flag(false, FLAG_C);
+    cpu.set_flag(FLAG_C, false);
     assert_eq!(cpu.add_carry(0xFF, 1), 0);
     assert_eq!(cpu.test_flag(FLAG_N), false);
     assert_eq!(cpu.test_flag(FLAG_V), false);
@@ -914,7 +948,7 @@ fn test_add_carry() {
     assert_eq!(cpu.test_flag(FLAG_C), true); // unsigned overflow
 
     // Unsigned overflow from carry
-    cpu.set_flag(true, FLAG_C);
+    cpu.set_flag(FLAG_C, true);
     assert_eq!(cpu.add_carry(0xFF, 0), 0);
     assert_eq!(cpu.test_flag(FLAG_N), false);
     assert_eq!(cpu.test_flag(FLAG_V), false);
@@ -922,7 +956,7 @@ fn test_add_carry() {
     assert_eq!(cpu.test_flag(FLAG_C), true); // unsigned overflow
 
     // Signed overflow (positive + positive -> negative)
-    cpu.set_flag(false, FLAG_C);
+    cpu.set_flag(FLAG_C, false);
     assert_eq!(cpu.add_carry(0x40, 0x40), 0x80);
     assert_eq!(cpu.test_flag(FLAG_N), true);
     assert_eq!(cpu.test_flag(FLAG_V), true); // signed overflow
@@ -930,7 +964,7 @@ fn test_add_carry() {
     assert_eq!(cpu.test_flag(FLAG_C), false);
 
     // Signed overflow (negative + negative -> positive)
-    cpu.set_flag(false, FLAG_C);
+    cpu.set_flag(FLAG_C, false);
     assert_eq!(cpu.add_carry(0x80, 0x80), 0); // -128 + -128
     assert_eq!(cpu.test_flag(FLAG_N), false);
     assert_eq!(cpu.test_flag(FLAG_V), true); // signed overflow
@@ -944,7 +978,7 @@ fn test_sub_borrow() {
     let mut cpu = CPU_6502::new(Arc::new(bus));
 
     // Subtract self
-    cpu.set_flag(true, FLAG_C); // clear borrow (set carry)
+    cpu.set_flag(FLAG_C, true); // clear borrow (set carry)
     assert_eq!(cpu.sub_borrow(0xFF, 0xFF), 0);
     assert_eq!(cpu.test_flag(FLAG_N), false);
     assert_eq!(cpu.test_flag(FLAG_V), false);
@@ -952,7 +986,7 @@ fn test_sub_borrow() {
     assert_eq!(cpu.test_flag(FLAG_C), true); // borrow clear (carry set)
 
     // Signed underflow from borrow
-    cpu.set_flag(false, FLAG_C); // set borrow (clear carry)
+    cpu.set_flag(FLAG_C, false); // set borrow (clear carry)
     assert_eq!(cpu.sub_borrow(0, 0), 0xFF);
     assert_eq!(cpu.test_flag(FLAG_N), true);
     assert_eq!(cpu.test_flag(FLAG_V), false);
@@ -960,7 +994,7 @@ fn test_sub_borrow() {
     assert_eq!(cpu.test_flag(FLAG_C), false); // borrow set (carry clear)
 
     // Signed overflow (negative - positive -> positive)
-    cpu.set_flag(true, FLAG_C); // clear borrow (set carry)
+    cpu.set_flag(FLAG_C, true); // clear borrow (set carry)
     assert_eq!(cpu.sub_borrow(0x80, 0x01), 0x7F); // -128 - 1 = 127
     assert_eq!(cpu.test_flag(FLAG_N), false);
     assert_eq!(cpu.test_flag(FLAG_V), true); // signed overflow
@@ -968,7 +1002,7 @@ fn test_sub_borrow() {
     assert_eq!(cpu.test_flag(FLAG_C), true); // borrow clear (carry set)
 
     // Signed overflow (negative - positive -> positive)
-    cpu.set_flag(true, FLAG_C); // clear borrow (set carry)
+    cpu.set_flag(FLAG_C, true); // clear borrow (set carry)
     assert_eq!(cpu.sub_borrow(0x7F, 0xFF), 0x80); // 127 - (-1) = -128
     assert_eq!(cpu.test_flag(FLAG_N), true);
     assert_eq!(cpu.test_flag(FLAG_V), true); // signed overflow
