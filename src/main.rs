@@ -12,6 +12,11 @@ fn main() {
     // CPU dictates address and data sizes
     let mut bus = Bus::new();
 
+    let mut start_address = RAM::new(2);
+    start_address.write(0, 0);
+    start_address.write(1, 0);
+    bus.add_port(cpu::RESET_VECTOR, Arc::new(RwLock::new(start_address)));
+
     // Simple program to write 5 to address 16 (start of RAM)
     let mut rom = RAM::new(16);
     rom.write(0, 0xA9); // LDA #5

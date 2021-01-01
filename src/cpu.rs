@@ -13,6 +13,10 @@ const FLAG_I: Data = 0b0000_0100; // Interrupt disable
 const FLAG_Z: Data = 0b0000_0010; // Zero (set if zero!)
 const FLAG_C: Data = 0b0000_0001; // Carry (unsigned overflow)
 
+pub const NMI_VECTOR: Address = 0xFFFA;
+pub const RESET_VECTOR: Address = 0xFFFC;
+pub const IRQ_VECTOR: Address = 0xFFFE;
+
 pub struct CPU_6502 {
     a: Data,
     x: Data,
@@ -30,8 +34,32 @@ impl CPU_6502 {
         let y = 0;
         let flags = 0;
         let sp = 0xFF;
-        let pc = 0; // TODO what should the initial PC/reset vector be?
-        Self { a, x, y, flags, sp, pc, bus }
+        let pc = 0;
+        let mut new = Self { a, x, y, flags, sp, pc, bus };
+        new.reset();
+        new
+    }
+
+    pub fn reset(&mut self) {
+        self.flags = 0;
+        self.sp = 0xFF;
+        self.pc = self.read_vector(RESET_VECTOR);
+    }
+
+    fn read_vector(&self, address: Address) -> Address {
+        if cfg!(target_endian = "little") {
+            let mut bytes = [0; 2];
+            bytes[0] = self.bus.read(address).unwrap();
+            bytes[1] = self.bus.read(address + 1).unwrap();
+            u16::from_le_bytes(bytes)
+        } else if cfg!(target_endian = "big") {
+            let mut bytes = [0; 2];
+            bytes[0] = self.bus.read(address + 1).unwrap();
+            bytes[1] = self.bus.read(address).unwrap();
+            u16::from_be_bytes(bytes)
+        } else {
+            unreachable!();
+        }
     }
 
     // Stack functions
@@ -130,6 +158,19 @@ impl CPU_6502 {
             // TODO verify this is correct when bit 15 of PC is set
             self.pc = (self.pc as i16 + rel as i16) as Address;
         }
+    }
+
+    fn op_break(&mut self) {
+        // NOTE return address skips a byte after BRK
+        self.push_address(self.pc + 1);
+        self.push_status(false);
+
+        // Set interrupt mask and jump to interrupt vector
+        self.set_flag(FLAG_I, true);
+        self.pc = self.read_vector(IRQ_VECTOR);
+
+        // TODO temporarily using break flag to stop run loop
+        self.set_flag(FLAG_B, true);
     }
 
     // Arithmetic functions
@@ -415,19 +456,7 @@ impl CPU_6502 {
                 self.branch(FLAG_N, false);
             },
             0x00 => { // BRK
-                // NOTE return address skips a byte after BRK
-                self.push_address(self.pc + 1);
-                self.push_status(false);
-                self.set_flag(FLAG_I, true);
-
-                // Jump to interrupt vector 0xFFFE
-                //let addr_lo = self.bus.read(0xFFFE).unwrap();
-                //let addr_hi = self.bus.read(0xFFFF).unwrap();
-                //self.pc = addr_lo as Address | ((addr_hi as Address) << 8);
-
-                // TODO until bus ranges are fixed, just jump to 0 and set break flag to stop loop
-                self.set_flag(FLAG_B, true);
-                self.pc = 0;
+                self.op_break();
             },
             0x50 => { // BVC Rel
                 self.branch(FLAG_V, false);
@@ -913,9 +942,26 @@ impl CPU_6502 {
     }
 }
 
+#[cfg(test)]
+fn add_jump_table(bus: &mut Bus<Address, Data>, nmi: Address, reset: Address, irq: Address) {
+    use super::memory::RAM;
+    use super::bus::Port;
+    use std::sync::RwLock;
+
+    let mut jump_table = RAM::new(0x100);
+    jump_table.write(NMI_VECTOR & 0xFF, (nmi & 0xFF) as Data);
+    jump_table.write((NMI_VECTOR + 1) & 0xFF, (nmi >> 8) as Data);
+    jump_table.write(RESET_VECTOR & 0xFF, (reset & 0xFF) as Data);
+    jump_table.write((RESET_VECTOR + 1) & 0xFF, (reset >> 8) as Data);
+    jump_table.write(IRQ_VECTOR & 0xFF, (irq & 0xFF) as Data);
+    jump_table.write((IRQ_VECTOR + 1) & 0xFF, (irq >> 8) as Data);
+    bus.add_port(0xFF00, Arc::new(RwLock::new(jump_table)));
+}
+
 #[test]
 fn test_compare() {
-    let bus = Bus::new();
+    let mut bus = Bus::new();
+    add_jump_table(&mut bus, 0, 0, 0);
     let mut cpu = CPU_6502::new(Arc::new(bus));
 
     cpu.compare(30, 40);
@@ -936,7 +982,8 @@ fn test_compare() {
 
 #[test]
 fn test_add_carry() {
-    let bus = Bus::new();
+    let mut bus = Bus::new();
+    add_jump_table(&mut bus, 0, 0, 0);
     let mut cpu = CPU_6502::new(Arc::new(bus));
 
     // Unsigned overflow (carry out)
@@ -974,7 +1021,8 @@ fn test_add_carry() {
 
 #[test]
 fn test_sub_borrow() {
-    let bus = Bus::new();
+    let mut bus = Bus::new();
+    add_jump_table(&mut bus, 0, 0, 0);
     let mut cpu = CPU_6502::new(Arc::new(bus));
 
     // Subtract self
@@ -1018,6 +1066,7 @@ fn test_lda_adc_sta() {
 
     // CPU dictates address and data sizes
     let mut bus = Bus::new();
+    add_jump_table(&mut bus, 0, 0, 0);
 
     let lhs = 5;
     let rhs = 3;
@@ -1050,6 +1099,7 @@ fn test_multiplication() {
 
     // CPU dictates address and data sizes
     let mut bus = Bus::new();
+    add_jump_table(&mut bus, 0, 0, 0);
 
     // Multiplication routine from "Programming the 6502"
     let multiplier = 15;
@@ -1117,6 +1167,9 @@ fn test_wrapping() {
     use super::bus::Port;
     use std::sync::RwLock;
 
+    let mut bus = Bus::new();
+    add_jump_table(&mut bus, 0, 0, 0);
+
     let result1 = 200;
     let result2 = 201;
     let result3 = 202;
@@ -1140,8 +1193,6 @@ fn test_wrapping() {
     ram.write(12, 0x95); // STA -1, X
     ram.write(13, 255); // zp
     ram.write(14, 0x00); // BRK
-
-    let mut bus = Bus::new();
     bus.add_port(0, Arc::new(RwLock::new(ram)));
 
     // Execute until break
