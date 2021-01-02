@@ -148,9 +148,9 @@ impl CPU_6502 {
     }
 
     fn compare_bits(&mut self, left: Data, right: Data) {
-        // Set the N and V flags from bits 7 and 6 of the tested address
-        let flags_nz = 0b1100_0000;
-        self.flags = (self.flags & !flags_nz) | (right & flags_nz);
+        // Set the N and V flags from the same bits of the tested address
+        let mask = FLAG_N | FLAG_V;
+        self.flags = (self.flags & !mask) | (right & mask);
         self.set_flag(FLAG_Z, left & right == 0);
     }
 
