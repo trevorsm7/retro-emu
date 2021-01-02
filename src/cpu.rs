@@ -7,7 +7,8 @@ type Data = u8;
 
 const FLAG_N: Data = 0b1000_0000; // Negative (bit 7 of last operation)
 const FLAG_V: Data = 0b0100_0000; // Signed overflow
-const FLAG_B: Data = 0b0001_0000; // Break indicator
+const FLAG_5: Data = 0b0010_0000; // Unused bit 5 (always set on stack)
+const FLAG_B: Data = 0b0001_0000; // Break indicator (only exists on stack)
 const FLAG_D: Data = 0b0000_1000; // Decimal mode
 const FLAG_I: Data = 0b0000_0100; // Interrupt disable
 const FLAG_Z: Data = 0b0000_0010; // Zero (set if zero!)
@@ -77,15 +78,15 @@ impl CPU_6502 {
     }
 
     fn push_status(&mut self, interrupt: bool) {
-        // Set bit 5 and conditionally set bit 4 if not an interrupt
-        let mask = 0b1100_1111;
-        let set = 0x20 | ((!interrupt) as u8) << 4;
+        // Set unused bit 5 and conditionally set break flag if not an interrupt
+        let mask = FLAG_N | FLAG_V | FLAG_D | FLAG_I | FLAG_Z | FLAG_C;
+        let set = FLAG_5 | (if !interrupt {FLAG_B} else {0});
         self.push_data((self.flags & mask) | set);
     }
 
     fn pop_status(&mut self) {
-        // Clear bits 4 and 5
-        let mask = 0b1100_1111;
+        // Clear break and unused flags
+        let mask = FLAG_N | FLAG_V | FLAG_D | FLAG_I | FLAG_Z | FLAG_C;
         self.flags = self.pop_data() & mask;
     }
 
@@ -148,7 +149,8 @@ impl CPU_6502 {
 
     fn compare_bits(&mut self, left: Data, right: Data) {
         // Set the N and V flags from bits 7 and 6 of the tested address
-        self.flags = (self.flags & 0b0011_1111) | (right & 0b1100_0000);
+        let flags_nz = 0b1100_0000;
+        self.flags = (self.flags & !flags_nz) | (right & flags_nz);
         self.set_flag(FLAG_Z, left & right == 0);
     }
 
@@ -242,7 +244,7 @@ impl CPU_6502 {
 
     fn rotate_right(&mut self, input: Data, carry_in: bool) -> Data {
         self.set_flag(FLAG_C, input & 0x01 != 0);
-        let result = (input >> 1) | ((carry_in as u8) << 7);
+        let result = (input >> 1) | if carry_in {0x80} else {0};
         self.update_flags_nz(result);
         result
     }
