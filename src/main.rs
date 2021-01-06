@@ -14,13 +14,15 @@ fn main() {
     let b = 3;
     let address = 16;
     let (_, code) = asm::assemble(format!("
-        CODE $0000
+        CODE $0000 ; start code segment at address 0
         LDA #{}
         ADC #{}
-        STA {}
+        STA @{} ; new @ prefix for explicit zero page
         BRK
         ENDCODE", a, b, address).as_ref(),
     ).drain(..).next().unwrap();
+
+    println!("{:02x?}", code);
 
     // CPU dictates address and data sizes
     let mut bus = Bus::new();
