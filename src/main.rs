@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock};
 
+mod asm;
 mod cpu;
 mod bus;
 mod memory;
@@ -9,33 +10,35 @@ use bus::{Port, Bus};
 use memory::RAM;
 
 fn main() {
+    let a = 5;
+    let b = 3;
+    let address = 16;
+    let (_, code) = asm::assemble(format!("
+        CODE $0000
+        LDA #{}
+        ADC #{}
+        STA {}
+        BRK
+        ENDCODE", a, b, address).as_ref(),
+    ).drain(..).next().unwrap();
+
     // CPU dictates address and data sizes
     let mut bus = Bus::new();
 
-    let mut start_address = RAM::new(2);
-    start_address.write(0, 0);
-    start_address.write(1, 0);
-    bus.add_port(cpu::RESET_VECTOR, Arc::new(RwLock::new(start_address)));
+    let jump_table = RAM::new(6); //< Default initialized to zeroes
+    bus.add_port(cpu::NMI_VECTOR, Arc::new(RwLock::new(jump_table)));
 
     // Simple program to write 5 to address 16 (start of RAM)
-    let mut rom = RAM::new(16);
-    rom.write(0, 0xA9); // LDA #5
-    rom.write(1, 5);
-    rom.write(2, 0x69); // ADC #3
-    rom.write(3, 3);
-    rom.write(4, 0x85); // STA 16
-    rom.write(5, 16);
-    bus.add_port(0, Arc::new(RwLock::new(rom)));
-
-    let ram = Arc::new(RwLock::new(RAM::new(16)));
-    bus.add_port(16, ram.clone());
+    let mut ram = RAM::new(512);
+    for (i, &byte) in code.iter().enumerate() {
+        ram.write(i as u16, byte); //< TODO add RAM::from or ram.memcpy
+    }
+    bus.add_port(0, Arc::new(RwLock::new(ram)));
 
     // Execute 3 instructions
-    let mut cpu = CPU_6502::new(Arc::new(bus));
-    for _i in 0..3 {
-        cpu.tick();
-    }
+    let bus = Arc::new(bus);
+    let mut cpu = CPU_6502::new(bus.clone());
+    cpu.run_until_break();
 
-    let ram = ram.read().unwrap();
-    println!("{}", ram.read(0));
+    println!("{} + {} = {}", a, b, bus.read(address).unwrap());
 }
