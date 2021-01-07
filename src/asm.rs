@@ -85,18 +85,11 @@ impl LineParser for DefaultParser {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum LabelKind {
-    ZeroPage,
-    Absolute,
-    Relative,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct CodeParser {
     offset: Address,
     code: Vec<Data>,
-    undefined: Vec<(String, Address, LabelKind)>,
+    undefined: Vec<(LabelKind, Address)>,
 }
 
 impl CodeParser {
@@ -108,19 +101,19 @@ impl CodeParser {
 
     fn assemble(mut self, labels: &LabelMap) -> Option<(Address, Vec<Data>)> {
         // Substitute labels that were undefined in the first pass
-        for (label, position, kind) in self.undefined {
-            // TODO propagate errors as Result
-            let &address = labels.get(label.as_str()).unwrap();
-            match kind {
-                LabelKind::ZeroPage => {
+        for (label, position) in self.undefined {
+            // TODO propagate still undefined labels as error
+            let &address = labels.get(label.get_label()).unwrap();
+            match label {
+                LabelKind::ZeroPage(_) => {
                     assert!(address < 256);
                     self.code[position as usize] = address as Data;
                 },
-                LabelKind::Absolute => {
+                LabelKind::Absolute(_) => {
                     self.code[position as usize] = (address & 0xFF) as Data;
                     self.code[position as usize + 1] = (address >> 8) as Data;
                 },
-                LabelKind::Relative => {
+                LabelKind::Relative(_) => {
                     let rel = address as i32 - (self.offset + position + 1) as i32;
                     assert!(rel >= -128 && rel < 128);
                     self.code[position as usize] = rel as Data; //< TODO make sure that negative labels convert correctly
@@ -160,46 +153,19 @@ impl LineParser for CodeParser {
             }
         } else if let Some((code, operand)) = parse_instruction(command) {
             self.code.push(code);
-            // TODO this needs serious refactoring and handling of more cases
-            match operand {
-                Operand::Implied => (),
-                Operand::Immediate(data) => self.code.push(data),
-                Operand::Absolute(sym) => {
-                    match sym.get(labels) {
-                        Ok(value) => {
-                            self.code.push((value & 0xFF) as Data);
-                            self.code.push((value >> 8) as Data);
-                        },
-                        Err(label) => {
-                            self.undefined.push((label.to_string(), self.code.len() as Address, LabelKind::Absolute));
-                            self.code.push(0);
-                            self.code.push(0);
-                        }
-                    }
+            match operand.get_value(labels) {
+                Ok(ValueKind::None) => (),
+                Ok(ValueKind::Single(value)) => self.code.push(value),
+                Ok(ValueKind::Double(value)) => {
+                    // Push value as little endian
+                    self.code.push((value & 0xFF) as Data);
+                    self.code.push((value >> 8) as Data);
                 },
-                Operand::ZeroPage(sym) => {
-                    match sym.get(labels) {
-                        Ok(value) => self.code.push(value),
-                        Err(label) => {
-                            self.undefined.push((label.to_string(), self.code.len() as Address, LabelKind::ZeroPage));
-                            self.code.push(0);
-                        }
-                    }
+                Err(label) => {
+                    let size = label.size();
+                    self.undefined.push((label, self.code.len() as Address));
+                    self.code.resize(self.code.len() + size, 0);
                 },
-                Operand::Indirect(sym) => {
-                    match sym.get(labels) {
-                        Ok(value) => {
-                            self.code.push((value & 0xFF) as Data);
-                            self.code.push((value >> 8) as Data);
-                        },
-                        Err(label) => {
-                            self.undefined.push((label.to_string(), self.code.len() as Address, LabelKind::Absolute));
-                            self.code.push(0);
-                            self.code.push(0);
-                        }
-                    }
-                },
-                _ => panic!("Unhandled operand type"),
             };
             None
         } else {
@@ -245,7 +211,7 @@ fn test_parse_label() {
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Symbol<'a, T> {
-    Constant(T),
+    Value(T),
     Label(&'a str),
 }
 
@@ -254,9 +220,9 @@ impl<'a, T> Symbol<'a, T> {
         std::mem::size_of::<T>()
     }
 
-    fn get(&self, labels: &LabelMap) -> Result<T, &str> where T: Copy + FromPrimitive {
-        match self {
-            &Self::Constant(value) => Ok(value),
+    fn get_value(&self, labels: &LabelMap) -> Result<T, &str> where T: Copy + FromPrimitive {
+        match *self {
+            Self::Value(value) => Ok(value),
             Self::Label(label) => match labels.get(label) {
                 Some(&value) => Ok(T::from_u16(value).unwrap()), //< TODO may need to handle this unwrap
                 None => Err(label),
@@ -269,23 +235,56 @@ fn parse_symbol<T: Num>(token: &str) -> Result<Symbol<T>, T::FromStrRadixErr> {
     if let Some(label) = parse_label(token) {
         Ok(Symbol::Label(label))
     } else {
-        parse_number(token).map(Symbol::Constant)
+        parse_number(token).map(Symbol::Value)
     }
 }
 
 #[test]
 fn test_parse_symbol() {
-    assert_eq!(parse_symbol("$FF"), Ok(Symbol::Constant(0xFF)));
-    assert_eq!(parse_symbol("%1010"), Ok(Symbol::Constant(0b1010)));
-    assert_eq!(parse_symbol("1234"), Ok(Symbol::Constant(1234)));
+    assert_eq!(parse_symbol("$FF"), Ok(Symbol::Value(0xFF)));
+    assert_eq!(parse_symbol("%1010"), Ok(Symbol::Value(0b1010)));
+    assert_eq!(parse_symbol("1234"), Ok(Symbol::Value(1234)));
     assert_eq!(parse_symbol::<Data>("twenty"), Ok(Symbol::Label("twenty")));
     assert!(parse_symbol::<Data>("***").is_err());
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum ValueKind {
+    None,
+    Single(Data),
+    Double(Address),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum LabelKind {
+    ZeroPage(String),
+    Absolute(String),
+    Relative(String),
+}
+
+impl LabelKind {
+    fn size(&self) -> usize {
+        match self {
+            Self::ZeroPage(_) => 1,
+            Self::Absolute(_) => 2,
+            Self::Relative(_) => 1,
+        }
+    }
+
+    fn get_label(&self) -> &str {
+        match self {
+            Self::ZeroPage(label) => label,
+            Self::Absolute(label) => label,
+            Self::Relative(label) => label,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Operand<'a> {
     Implied,
     Immediate(Data),
+    Relative(Symbol<'a, Data>),
     ZeroPage(Symbol<'a, Data>),
     ZeroPageX(Symbol<'a, Data>),
     ZeroPageY(Symbol<'a, Data>),
@@ -303,6 +302,7 @@ impl<'a> Operand<'a> {
         match self {
             Self::Implied => 0,
             Self::Immediate(data) => std::mem::size_of_val(data),
+            Self::Relative(sym) => sym.size(),
             Self::ZeroPage(sym) => sym.size(),
             Self::ZeroPageX(sym) => sym.size(),
             Self::ZeroPageY(sym) => sym.size(),
@@ -315,21 +315,52 @@ impl<'a> Operand<'a> {
         }
     }
 
-    /*fn push_bytes(&self, bytes: &mut Vec<u8>, labels: &HashMap<&str, usize>) {
-        match self {
-            Self::Implied => (),
-            Self::Immediate(symbol) => /*encode symbol into 1 or 2 bytes*/,
-            Self::ZeroPage(_) => 1,
-            Self::ZeroPageX(_) => 1,
-            Self::ZeroPageY(_) => 1,
-            Self::Absolute(_) => 2,
-            Self::AbsoluteX(_) => 2,
-            Self::AbsoluteY(_) => 2,
-            Self::Indirect(_) => 2,
-            Self::IndexedIndirectX(_) => 1,
-            Self::IndirectIndexedY(_) => 1,
-        };
-    }*/
+    fn get_value(&self, labels: &LabelMap) -> Result<ValueKind, LabelKind> {
+        match *self {
+            Self::Implied => Ok(ValueKind::None),
+            Self::Immediate(data) => Ok(ValueKind::Single(data)),
+            Self::Relative(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Single(value)),
+                Err(label) => Err(LabelKind::Relative(label.to_string())),
+            },
+            Self::ZeroPage(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Single(value)),
+                Err(label) => Err(LabelKind::ZeroPage(label.to_string())),
+            },
+            Self::ZeroPageX(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Single(value)),
+                Err(label) => Err(LabelKind::ZeroPage(label.to_string())),
+            },
+            Self::ZeroPageY(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Single(value)),
+                Err(label) => Err(LabelKind::ZeroPage(label.to_string())),
+            },
+            Self::Absolute(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Double(value)),
+                Err(label) => Err(LabelKind::Absolute(label.to_string())),
+            },
+            Self::AbsoluteX(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Double(value)),
+                Err(label) => Err(LabelKind::Absolute(label.to_string())),
+            },
+            Self::AbsoluteY(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Double(value)),
+                Err(label) => Err(LabelKind::Absolute(label.to_string())),
+            },
+            Self::Indirect(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Double(value)),
+                Err(label) => Err(LabelKind::Absolute(label.to_string())),
+            },
+            Self::IndexedIndirectX(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Single(value)),
+                Err(label) => Err(LabelKind::ZeroPage(label.to_string())),
+            },
+            Self::IndirectIndexedY(symbol) => match symbol.get_value(labels) {
+                Ok(value) => Ok(ValueKind::Single(value)),
+                Err(label) => Err(LabelKind::ZeroPage(label.to_string())),
+            },
+        }
+    }
 }
 
 fn parse_operand(token: &str) -> Option<Operand> {
@@ -355,8 +386,8 @@ fn parse_operand(token: &str) -> Option<Operand> {
 fn test_parse_operand() {
     assert_eq!(parse_operand(""), Some(Operand::Implied));
     assert_eq!(parse_operand("#$FF"), Some(Operand::Immediate(0xFF)));
-    assert_eq!(parse_operand("@%1010"), Some(Operand::ZeroPage(Symbol::Constant(0b1010))));
-    assert_eq!(parse_operand("1024"), Some(Operand::Absolute(Symbol::Constant(1024))));
+    assert_eq!(parse_operand("@%1010"), Some(Operand::ZeroPage(Symbol::Value(0b1010))));
+    assert_eq!(parse_operand("1024"), Some(Operand::Absolute(Symbol::Value(1024))));
     assert_eq!(parse_operand("(label)"), Some(Operand::Indirect(Symbol::Label("label"))));
 }
 
@@ -453,7 +484,7 @@ fn parse_instruction(instruction: &str) -> Option<(u8, Operand)> {
 #[test]
 fn test_parse_instruction() {
     assert_eq!(parse_instruction("ADC #$FF"), Some((0x69, Operand::Immediate(0xFF))));
-    assert_eq!(parse_instruction("ADC @$20"), Some((0x65, Operand::ZeroPage(Symbol::Constant(0x20)))));
+    assert_eq!(parse_instruction("ADC @$20"), Some((0x65, Operand::ZeroPage(Symbol::Value(0x20)))));
     assert_eq!(parse_instruction("JMP (label)"), Some((0x6C, Operand::Indirect(Symbol::Label("label")))));
     assert_eq!(parse_instruction("BRK"), Some((0x00, Operand::Implied)));
     assert_eq!(parse_instruction("WOT que?"), None);
