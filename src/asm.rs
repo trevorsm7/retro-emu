@@ -49,6 +49,49 @@ pub fn assemble(source: &str) -> Vec<(Address, Vec<Data>)> {
     Rc::try_unwrap(default).unwrap().into_inner().assemble(&labels)
 }
 
+#[test]
+fn test_assemble() {
+    assert_eq!(assemble(""),
+        vec![]);
+
+    assert_eq!(assemble("
+        CODE 0
+        ENDCODE"),
+        vec![(0, vec![])]);
+
+    assert_eq!(assemble("
+        CODE $300
+        LDX #8
+        loop: ASL A ; shift A left 8 times
+        DEX
+        BNE loop
+        BRK
+        ENDCODE"),
+        vec![(0x300, vec![0xA2, 8, 0x0A, 0xCA, 0xD0, (-4i8) as u8, 0x00])]);
+
+    assert_eq!(assemble("
+        CODE $0
+        LDA #%00101010
+        JSR leading_zeroes
+        STA @$FF
+        BRK
+        ENDCODE
+
+        CODE $200
+        leading_zeroes: LDX #-8
+        loop: ROL A ; rotate left 8 times
+        BCS end ; exit loop when we find the leading 1
+        INX
+        BNE loop
+        end: TXA
+        CLC ; don't forget to clear carry after ROL sets it...
+        ADC #8 ; convert counter to number of leading zeros in A
+        RTS
+        ENDCODE"),
+        vec![(0, vec![0xA9, 0b00101010, 0x20, 0x00, 0x02, 0x85, 0xff, 0x00]),
+            (0x200, vec![0xA2, (-8i8) as u8, 0x2A, 0xB0, 3, 0xE8, 0xD0, (-6i8) as u8, 0x8A, 0x18, 0x69, 8, 0x60])]);
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct DefaultParser {
     code_segments: Vec<Rc<RefCell<CodeParser>>>,
@@ -92,6 +135,12 @@ struct CodeParser {
     undefined: Vec<(LabelKind, Address)>,
 }
 
+fn compute_relative_address(to: Address, from: Address) -> Data {
+    let rel = to as i32 - from as i32;
+    assert!(rel >= -128 && rel < 128); //< TODO return result instead of panic
+    rel as Data //< TODO make sure that negative labels convert correctly
+}
+
 impl CodeParser {
     fn new(offset: Address) -> Self {
         let code = vec![];
@@ -114,9 +163,8 @@ impl CodeParser {
                     self.code[position as usize + 1] = (address >> 8) as Data;
                 },
                 LabelKind::Relative(_) => {
-                    let rel = address as i32 - (self.offset + position + 1) as i32;
-                    assert!(rel >= -128 && rel < 128);
-                    self.code[position as usize] = rel as Data; //< TODO make sure that negative labels convert correctly
+                    let from = self.offset + position + 1;
+                    self.code[position as usize] = compute_relative_address(address, from);
                 },
             };
         }
@@ -161,6 +209,10 @@ impl LineParser for CodeParser {
                     self.code.push((value & 0xFF) as Data);
                     self.code.push((value >> 8) as Data);
                 },
+                Ok(ValueKind::Relative(address)) => {
+                    let from = self.offset + (self.code.len() + 1) as Address;
+                    self.code.push(compute_relative_address(address, from));
+                },
                 Err(label) => {
                     let size = label.size();
                     self.undefined.push((label, self.code.len() as Address));
@@ -189,12 +241,14 @@ fn test_parse_number() {
     assert_eq!(parse_number("$FF"), Ok(0xFF));
     assert_eq!(parse_number("%1010"), Ok(0b1010));
     assert_eq!(parse_number("1234"), Ok(1234));
+    assert_eq!(parse_number("-123"), Ok(-123));
     assert!(parse_number::<u16>("twenty").is_err());
 }
 
 fn parse_label(token: &str) -> Option<&str> {
     // First char must be alphabetic and remainder must be alphanumeric
-    if token.starts_with(char::is_alphabetic) && token.find(|c| !char::is_alphanumeric(c)).is_none() {
+    let valid = |c| !(char::is_alphanumeric(c) || c == '_');
+    if token.starts_with(char::is_alphabetic) && token.find(valid).is_none() {
         Some(token)
     } else {
         None
@@ -207,6 +261,7 @@ fn test_parse_label() {
     assert_eq!(parse_label("bar1"), Some("bar1"));
     assert_eq!(parse_label("1baz"), None);
     assert_eq!(parse_label("bad space"), None);
+    assert_eq!(parse_label("ok_underscore"), Some("ok_underscore"));
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -253,6 +308,7 @@ enum ValueKind {
     None,
     Single(Data),
     Double(Address),
+    Relative(Address),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -285,7 +341,7 @@ enum Operand<'a> {
     Implied,
     Accumulator,
     Immediate(Data),
-    Relative(Symbol<'a, Data>), //< TODO! this will be parsed as Absolute and must be converted when matching with branch instructions!!
+    Relative(Symbol<'a, Address>), //< NOTE the full address is converted to 1 byte relative address when assembled
     ZeroPage(Symbol<'a, Data>),
     ZeroPageX(Symbol<'a, Data>),
     ZeroPageY(Symbol<'a, Data>),
@@ -304,7 +360,7 @@ impl<'a> Operand<'a> {
             Self::Implied => 0,
             Self::Accumulator => 0,
             Self::Immediate(data) => std::mem::size_of_val(data),
-            Self::Relative(sym) => sym.size(),
+            Self::Relative(sym) => 1, // NOTE assembler must store full (2 byte) address until assembly
             Self::ZeroPage(sym) => sym.size(),
             Self::ZeroPageX(sym) => sym.size(),
             Self::ZeroPageY(sym) => sym.size(),
@@ -323,7 +379,7 @@ impl<'a> Operand<'a> {
             Self::Accumulator => Ok(ValueKind::None),
             Self::Immediate(data) => Ok(ValueKind::Single(data)),
             Self::Relative(symbol) => match symbol.get_value(labels) {
-                Ok(value) => Ok(ValueKind::Single(value)),
+                Ok(value) => Ok(ValueKind::Relative(value)),
                 Err(label) => Err(LabelKind::Relative(label.to_string())),
             },
             Self::ZeroPage(symbol) => match symbol.get_value(labels) {
@@ -372,7 +428,9 @@ fn parse_operand(token: &str) -> Option<Operand> {
     } else if token == "A" || token == "a" {
         Some(Operand::Accumulator)
     } else if let Some(immediate) = token.strip_prefix('#') {
-        parse_number(immediate).ok().map(Operand::Immediate)
+        // NOTE parsing as i16 and converting to u8 to allow parsing negative values
+        // TODO do this more explicitly and validate value in range [-128, 255]
+        parse_number::<i16>(immediate).ok().map(|i| Operand::Immediate(i as Data))
     } else if let Some(indirect) = token.strip_prefix('(') {
         // TODO handle labels and indexing
         let mut tokens = indirect.split(')');
@@ -391,6 +449,7 @@ fn parse_operand(token: &str) -> Option<Operand> {
 fn test_parse_operand() {
     assert_eq!(parse_operand(""), Some(Operand::Implied));
     assert_eq!(parse_operand("#$FF"), Some(Operand::Immediate(0xFF)));
+    assert_eq!(parse_operand("#-10"), Some(Operand::Immediate((-10i8) as u8)));
     assert_eq!(parse_operand("@%1010"), Some(Operand::ZeroPage(Symbol::Value(0b1010))));
     assert_eq!(parse_operand("1024"), Some(Operand::Absolute(Symbol::Value(1024))));
     assert_eq!(parse_operand("(label)"), Some(Operand::Indirect(Symbol::Label("label"))));
@@ -477,159 +536,159 @@ fn parse_instruction(instruction: &str) -> Option<(u8, Operand)> {
     let operand = parse_operand(tokens.next().unwrap_or("").trim()).unwrap();
 
     match (mnemonic, operand) {
-        (Mnemonic::ADC, Operand::Immediate(_)) => Some(0x69),
-        (Mnemonic::ADC, Operand::ZeroPage(_)) => Some(0x65),
-        (Mnemonic::ADC, Operand::ZeroPageX(_)) => Some(0x75),
-        (Mnemonic::ADC, Operand::Absolute(_)) => Some(0x6D),
-        (Mnemonic::ADC, Operand::AbsoluteX(_)) => Some(0x7D),
-        (Mnemonic::ADC, Operand::AbsoluteY(_)) => Some(0x79),
-        (Mnemonic::ADC, Operand::IndexedIndirectX(_)) => Some(0x61),
-        (Mnemonic::ADC, Operand::IndirectIndexedY(_)) => Some(0x71),
-        (Mnemonic::AND, Operand::Immediate(_)) => Some(0x29),
-        (Mnemonic::AND, Operand::ZeroPage(_)) => Some(0x25),
-        (Mnemonic::AND, Operand::ZeroPageX(_)) => Some(0x35),
-        (Mnemonic::AND, Operand::Absolute(_)) => Some(0x2D),
-        (Mnemonic::AND, Operand::AbsoluteX(_)) => Some(0x3D),
-        (Mnemonic::AND, Operand::AbsoluteY(_)) => Some(0x39),
-        (Mnemonic::AND, Operand::IndexedIndirectX(_)) => Some(0x21),
-        (Mnemonic::AND, Operand::IndirectIndexedY(_)) => Some(0x31),
-        (Mnemonic::ASL, Operand::Accumulator) => Some(0x0A),
-        (Mnemonic::ASL, Operand::ZeroPage(_)) => Some(0x06),
-        (Mnemonic::ASL, Operand::ZeroPageX(_)) => Some(0x16),
-        (Mnemonic::ASL, Operand::Absolute(_)) => Some(0x0E),
-        (Mnemonic::ASL, Operand::AbsoluteX(_)) => Some(0x1E),
-        (Mnemonic::BCC, Operand::Relative(_)) => Some(0x90),
-        (Mnemonic::BCS, Operand::Relative(_)) => Some(0xB0),
-        (Mnemonic::BEQ, Operand::Relative(_)) => Some(0xF0),
-        (Mnemonic::BIT, Operand::ZeroPage(_)) => Some(0x24),
-        (Mnemonic::BIT, Operand::Absolute(_)) => Some(0x2C),
-        (Mnemonic::BMI, Operand::Relative(_)) => Some(0x30),
-        (Mnemonic::BNE, Operand::Relative(_)) => Some(0xD0),
-        (Mnemonic::BPL, Operand::Relative(_)) => Some(0x10),
-        (Mnemonic::BRK, Operand::Implied) => Some(0x00), //< TODO assemble as 2 bytes? maybe warn if not followed by NOP?
-        (Mnemonic::BVC, Operand::Relative(_)) => Some(0x50),
-        (Mnemonic::BVS, Operand::Relative(_)) => Some(0x70),
-        (Mnemonic::CLC, Operand::Implied) => Some(0x18),
-        (Mnemonic::CLD, Operand::Implied) => Some(0xD8),
-        (Mnemonic::CLI, Operand::Implied) => Some(0x58),
-        (Mnemonic::CLV, Operand::Implied) => Some(0xB8),
-        (Mnemonic::CMP, Operand::Immediate(_)) => Some(0xC9),
-        (Mnemonic::CMP, Operand::ZeroPage(_)) => Some(0xC5),
-        (Mnemonic::CMP, Operand::ZeroPageX(_)) => Some(0xD5),
-        (Mnemonic::CMP, Operand::Absolute(_)) => Some(0xCD),
-        (Mnemonic::CMP, Operand::AbsoluteX(_)) => Some(0xDD),
-        (Mnemonic::CMP, Operand::AbsoluteY(_)) => Some(0xD9),
-        (Mnemonic::CMP, Operand::IndexedIndirectX(_)) => Some(0xC1),
-        (Mnemonic::CMP, Operand::IndirectIndexedY(_)) => Some(0xD1),
-        (Mnemonic::CPX, Operand::Immediate(_)) => Some(0xE0),
-        (Mnemonic::CPX, Operand::ZeroPage(_)) => Some(0xE4),
-        (Mnemonic::CPX, Operand::Absolute(_)) => Some(0xEC),
-        (Mnemonic::CPY, Operand::Immediate(_)) => Some(0xC0),
-        (Mnemonic::CPY, Operand::ZeroPage(_)) => Some(0xC4),
-        (Mnemonic::CPY, Operand::Absolute(_)) => Some(0xCC),
-        (Mnemonic::DEC, Operand::ZeroPage(_)) => Some(0xC6),
-        (Mnemonic::DEC, Operand::ZeroPageX(_)) => Some(0xD6),
-        (Mnemonic::DEC, Operand::Absolute(_)) => Some(0xCE),
-        (Mnemonic::DEC, Operand::AbsoluteX(_)) => Some(0xDE),
-        (Mnemonic::DEX, Operand::Implied) => Some(0xCA),
-        (Mnemonic::DEY, Operand::Implied) => Some(0x88),
-        (Mnemonic::EOR, Operand::Immediate(_)) => Some(0x49),
-        (Mnemonic::EOR, Operand::ZeroPage(_)) => Some(0x45),
-        (Mnemonic::EOR, Operand::ZeroPageX(_)) => Some(0x55),
-        (Mnemonic::EOR, Operand::Absolute(_)) => Some(0x4D),
-        (Mnemonic::EOR, Operand::AbsoluteX(_)) => Some(0x5D),
-        (Mnemonic::EOR, Operand::AbsoluteY(_)) => Some(0x59),
-        (Mnemonic::EOR, Operand::IndexedIndirectX(_)) => Some(0x41),
-        (Mnemonic::EOR, Operand::IndirectIndexedY(_)) => Some(0x51),
-        (Mnemonic::INC, Operand::ZeroPage(_)) => Some(0xE6),
-        (Mnemonic::INC, Operand::ZeroPageX(_)) => Some(0xF6),
-        (Mnemonic::INC, Operand::Absolute(_)) => Some(0xEE),
-        (Mnemonic::INC, Operand::AbsoluteX(_)) => Some(0xFE),
-        (Mnemonic::INX, Operand::Implied) => Some(0xE8),
-        (Mnemonic::INY, Operand::Implied) => Some(0xC8),
-        (Mnemonic::JMP, Operand::Absolute(_)) => Some(0x4C),
-        (Mnemonic::JMP, Operand::Indirect(_)) => Some(0x6C),
-        (Mnemonic::JSR, Operand::Absolute(_)) => Some(0x20),
-        (Mnemonic::LDA, Operand::Immediate(_)) => Some(0xA9),
-        (Mnemonic::LDA, Operand::ZeroPage(_)) => Some(0xA5),
-        (Mnemonic::LDA, Operand::ZeroPageX(_)) => Some(0xB5),
-        (Mnemonic::LDA, Operand::Absolute(_)) => Some(0xAD),
-        (Mnemonic::LDA, Operand::AbsoluteX(_)) => Some(0xBD),
-        (Mnemonic::LDA, Operand::AbsoluteY(_)) => Some(0xB9),
-        (Mnemonic::LDA, Operand::IndexedIndirectX(_)) => Some(0xA1),
-        (Mnemonic::LDA, Operand::IndirectIndexedY(_)) => Some(0xB1),
-        (Mnemonic::LDX, Operand::Immediate(_)) => Some(0xA2),
-        (Mnemonic::LDX, Operand::ZeroPage(_)) => Some(0xA6),
-        (Mnemonic::LDX, Operand::ZeroPageY(_)) => Some(0xB6),
-        (Mnemonic::LDX, Operand::Absolute(_)) => Some(0xAE),
-        (Mnemonic::LDX, Operand::AbsoluteY(_)) => Some(0xBE),
-        (Mnemonic::LDY, Operand::Immediate(_)) => Some(0xA0),
-        (Mnemonic::LDY, Operand::ZeroPage(_)) => Some(0xA4),
-        (Mnemonic::LDY, Operand::ZeroPageX(_)) => Some(0xB4),
-        (Mnemonic::LDY, Operand::Absolute(_)) => Some(0xAC),
-        (Mnemonic::LDY, Operand::AbsoluteX(_)) => Some(0xBC),
-        (Mnemonic::LSR, Operand::Accumulator) => Some(0x4A),
-        (Mnemonic::LSR, Operand::ZeroPage(_)) => Some(0x46),
-        (Mnemonic::LSR, Operand::ZeroPageX(_)) => Some(0x56),
-        (Mnemonic::LSR, Operand::Absolute(_)) => Some(0x4E),
-        (Mnemonic::LSR, Operand::AbsoluteX(_)) => Some(0x5E),
-        (Mnemonic::NOP, Operand::Implied) => Some(0xEA),
-        (Mnemonic::ORA, Operand::Immediate(_)) => Some(0x09),
-        (Mnemonic::ORA, Operand::ZeroPage(_)) => Some(0x05),
-        (Mnemonic::ORA, Operand::ZeroPageX(_)) => Some(0x15),
-        (Mnemonic::ORA, Operand::Absolute(_)) => Some(0x0D),
-        (Mnemonic::ORA, Operand::AbsoluteX(_)) => Some(0x1D),
-        (Mnemonic::ORA, Operand::AbsoluteY(_)) => Some(0x19),
-        (Mnemonic::ORA, Operand::IndexedIndirectX(_)) => Some(0x01),
-        (Mnemonic::ORA, Operand::IndirectIndexedY(_)) => Some(0x11),
-        (Mnemonic::PHA, Operand::Implied) => Some(0x48),
-        (Mnemonic::PHP, Operand::Implied) => Some(0x08),
-        (Mnemonic::PLA, Operand::Implied) => Some(0x68),
-        (Mnemonic::PLP, Operand::Implied) => Some(0x28),
-        (Mnemonic::ROL, Operand::Accumulator) => Some(0x2A),
-        (Mnemonic::ROL, Operand::ZeroPage(_)) => Some(0x26),
-        (Mnemonic::ROL, Operand::ZeroPageX(_)) => Some(0x36),
-        (Mnemonic::ROL, Operand::Absolute(_)) => Some(0x2E),
-        (Mnemonic::ROL, Operand::AbsoluteX(_)) => Some(0x3E),
-        (Mnemonic::ROR, Operand::Accumulator) => Some(0x6A),
-        (Mnemonic::ROR, Operand::ZeroPage(_)) => Some(0x66),
-        (Mnemonic::ROR, Operand::ZeroPageX(_)) => Some(0x76),
-        (Mnemonic::ROR, Operand::Absolute(_)) => Some(0x6E),
-        (Mnemonic::ROR, Operand::AbsoluteX(_)) => Some(0x7E),
-        (Mnemonic::RTI, Operand::Implied) => Some(0x40),
-        (Mnemonic::RTS, Operand::Implied) => Some(0x60),
-        (Mnemonic::SBC, Operand::Immediate(_)) => Some(0xE9),
-        (Mnemonic::SBC, Operand::ZeroPage(_)) => Some(0xE5),
-        (Mnemonic::SBC, Operand::ZeroPageX(_)) => Some(0xF5),
-        (Mnemonic::SBC, Operand::Absolute(_)) => Some(0xED),
-        (Mnemonic::SBC, Operand::AbsoluteX(_)) => Some(0xFD),
-        (Mnemonic::SBC, Operand::AbsoluteY(_)) => Some(0xF9),
-        (Mnemonic::SBC, Operand::IndexedIndirectX(_)) => Some(0xE1),
-        (Mnemonic::SBC, Operand::IndirectIndexedY(_)) => Some(0xF1),
-        (Mnemonic::SEC, Operand::Implied) => Some(0x38),
-        (Mnemonic::SED, Operand::Implied) => Some(0xF8),
-        (Mnemonic::SEI, Operand::Implied) => Some(0x78),
-        (Mnemonic::STA, Operand::ZeroPage(_)) => Some(0x85),
-        (Mnemonic::STA, Operand::ZeroPageX(_)) => Some(0x95),
-        (Mnemonic::STA, Operand::Absolute(_)) => Some(0x8D),
-        (Mnemonic::STA, Operand::AbsoluteX(_)) => Some(0x9D),
-        (Mnemonic::STA, Operand::AbsoluteY(_)) => Some(0x99),
-        (Mnemonic::STA, Operand::IndexedIndirectX(_)) => Some(0x81),
-        (Mnemonic::STA, Operand::IndirectIndexedY(_)) => Some(0x91),
-        (Mnemonic::STX, Operand::ZeroPage(_)) => Some(0x86),
-        (Mnemonic::STX, Operand::ZeroPageY(_)) => Some(0x96),
-        (Mnemonic::STX, Operand::Absolute(_)) => Some(0x8E),
-        (Mnemonic::STY, Operand::ZeroPage(_)) => Some(0x84),
-        (Mnemonic::STY, Operand::ZeroPageX(_)) => Some(0x94),
-        (Mnemonic::STY, Operand::Absolute(_)) => Some(0x8C),
-        (Mnemonic::TAX, Operand::Implied) => Some(0xAA),
-        (Mnemonic::TAY, Operand::Implied) => Some(0xA8),
-        (Mnemonic::TSX, Operand::Implied) => Some(0xBA),
-        (Mnemonic::TXA, Operand::Implied) => Some(0x8A),
-        (Mnemonic::TXS, Operand::Implied) => Some(0x9A),
-        (Mnemonic::TYA, Operand::Implied) => Some(0x98),
+        (Mnemonic::ADC, Operand::Immediate(_)) => Some((0x69, operand)),
+        (Mnemonic::ADC, Operand::ZeroPage(_)) => Some((0x65, operand)),
+        (Mnemonic::ADC, Operand::ZeroPageX(_)) => Some((0x75, operand)),
+        (Mnemonic::ADC, Operand::Absolute(_)) => Some((0x6D, operand)),
+        (Mnemonic::ADC, Operand::AbsoluteX(_)) => Some((0x7D, operand)),
+        (Mnemonic::ADC, Operand::AbsoluteY(_)) => Some((0x79, operand)),
+        (Mnemonic::ADC, Operand::IndexedIndirectX(_)) => Some((0x61, operand)),
+        (Mnemonic::ADC, Operand::IndirectIndexedY(_)) => Some((0x71, operand)),
+        (Mnemonic::AND, Operand::Immediate(_)) => Some((0x29, operand)),
+        (Mnemonic::AND, Operand::ZeroPage(_)) => Some((0x25, operand)),
+        (Mnemonic::AND, Operand::ZeroPageX(_)) => Some((0x35, operand)),
+        (Mnemonic::AND, Operand::Absolute(_)) => Some((0x2D, operand)),
+        (Mnemonic::AND, Operand::AbsoluteX(_)) => Some((0x3D, operand)),
+        (Mnemonic::AND, Operand::AbsoluteY(_)) => Some((0x39, operand)),
+        (Mnemonic::AND, Operand::IndexedIndirectX(_)) => Some((0x21, operand)),
+        (Mnemonic::AND, Operand::IndirectIndexedY(_)) => Some((0x31, operand)),
+        (Mnemonic::ASL, Operand::Accumulator) => Some((0x0A, operand)),
+        (Mnemonic::ASL, Operand::ZeroPage(_)) => Some((0x06, operand)),
+        (Mnemonic::ASL, Operand::ZeroPageX(_)) => Some((0x16, operand)),
+        (Mnemonic::ASL, Operand::Absolute(_)) => Some((0x0E, operand)),
+        (Mnemonic::ASL, Operand::AbsoluteX(_)) => Some((0x1E, operand)),
+        (Mnemonic::BCC, Operand::Absolute(symbol)) => Some((0x90, Operand::Relative(symbol))),
+        (Mnemonic::BCS, Operand::Absolute(symbol)) => Some((0xB0, Operand::Relative(symbol))),
+        (Mnemonic::BEQ, Operand::Absolute(symbol)) => Some((0xF0, Operand::Relative(symbol))),
+        (Mnemonic::BIT, Operand::ZeroPage(_)) => Some((0x24, operand)),
+        (Mnemonic::BIT, Operand::Absolute(_)) => Some((0x2C, operand)),
+        (Mnemonic::BMI, Operand::Absolute(symbol)) => Some((0x30, Operand::Relative(symbol))),
+        (Mnemonic::BNE, Operand::Absolute(symbol)) => Some((0xD0, Operand::Relative(symbol))),
+        (Mnemonic::BPL, Operand::Absolute(symbol)) => Some((0x10, Operand::Relative(symbol))),
+        (Mnemonic::BRK, Operand::Implied) => Some((0x00, operand)), //< TODO assemble as 2 bytes? maybe warn if not followed by NOP?
+        (Mnemonic::BVC, Operand::Absolute(symbol)) => Some((0x50, Operand::Relative(symbol))),
+        (Mnemonic::BVS, Operand::Absolute(symbol)) => Some((0x70, Operand::Relative(symbol))),
+        (Mnemonic::CLC, Operand::Implied) => Some((0x18, operand)),
+        (Mnemonic::CLD, Operand::Implied) => Some((0xD8, operand)),
+        (Mnemonic::CLI, Operand::Implied) => Some((0x58, operand)),
+        (Mnemonic::CLV, Operand::Implied) => Some((0xB8, operand)),
+        (Mnemonic::CMP, Operand::Immediate(_)) => Some((0xC9, operand)),
+        (Mnemonic::CMP, Operand::ZeroPage(_)) => Some((0xC5, operand)),
+        (Mnemonic::CMP, Operand::ZeroPageX(_)) => Some((0xD5, operand)),
+        (Mnemonic::CMP, Operand::Absolute(_)) => Some((0xCD, operand)),
+        (Mnemonic::CMP, Operand::AbsoluteX(_)) => Some((0xDD, operand)),
+        (Mnemonic::CMP, Operand::AbsoluteY(_)) => Some((0xD9, operand)),
+        (Mnemonic::CMP, Operand::IndexedIndirectX(_)) => Some((0xC1, operand)),
+        (Mnemonic::CMP, Operand::IndirectIndexedY(_)) => Some((0xD1, operand)),
+        (Mnemonic::CPX, Operand::Immediate(_)) => Some((0xE0, operand)),
+        (Mnemonic::CPX, Operand::ZeroPage(_)) => Some((0xE4, operand)),
+        (Mnemonic::CPX, Operand::Absolute(_)) => Some((0xEC, operand)),
+        (Mnemonic::CPY, Operand::Immediate(_)) => Some((0xC0, operand)),
+        (Mnemonic::CPY, Operand::ZeroPage(_)) => Some((0xC4, operand)),
+        (Mnemonic::CPY, Operand::Absolute(_)) => Some((0xCC, operand)),
+        (Mnemonic::DEC, Operand::ZeroPage(_)) => Some((0xC6, operand)),
+        (Mnemonic::DEC, Operand::ZeroPageX(_)) => Some((0xD6, operand)),
+        (Mnemonic::DEC, Operand::Absolute(_)) => Some((0xCE, operand)),
+        (Mnemonic::DEC, Operand::AbsoluteX(_)) => Some((0xDE, operand)),
+        (Mnemonic::DEX, Operand::Implied) => Some((0xCA, operand)),
+        (Mnemonic::DEY, Operand::Implied) => Some((0x88, operand)),
+        (Mnemonic::EOR, Operand::Immediate(_)) => Some((0x49, operand)),
+        (Mnemonic::EOR, Operand::ZeroPage(_)) => Some((0x45, operand)),
+        (Mnemonic::EOR, Operand::ZeroPageX(_)) => Some((0x55, operand)),
+        (Mnemonic::EOR, Operand::Absolute(_)) => Some((0x4D, operand)),
+        (Mnemonic::EOR, Operand::AbsoluteX(_)) => Some((0x5D, operand)),
+        (Mnemonic::EOR, Operand::AbsoluteY(_)) => Some((0x59, operand)),
+        (Mnemonic::EOR, Operand::IndexedIndirectX(_)) => Some((0x41, operand)),
+        (Mnemonic::EOR, Operand::IndirectIndexedY(_)) => Some((0x51, operand)),
+        (Mnemonic::INC, Operand::ZeroPage(_)) => Some((0xE6, operand)),
+        (Mnemonic::INC, Operand::ZeroPageX(_)) => Some((0xF6, operand)),
+        (Mnemonic::INC, Operand::Absolute(_)) => Some((0xEE, operand)),
+        (Mnemonic::INC, Operand::AbsoluteX(_)) => Some((0xFE, operand)),
+        (Mnemonic::INX, Operand::Implied) => Some((0xE8, operand)),
+        (Mnemonic::INY, Operand::Implied) => Some((0xC8, operand)),
+        (Mnemonic::JMP, Operand::Absolute(_)) => Some((0x4C, operand)),
+        (Mnemonic::JMP, Operand::Indirect(_)) => Some((0x6C, operand)),
+        (Mnemonic::JSR, Operand::Absolute(_)) => Some((0x20, operand)),
+        (Mnemonic::LDA, Operand::Immediate(_)) => Some((0xA9, operand)),
+        (Mnemonic::LDA, Operand::ZeroPage(_)) => Some((0xA5, operand)),
+        (Mnemonic::LDA, Operand::ZeroPageX(_)) => Some((0xB5, operand)),
+        (Mnemonic::LDA, Operand::Absolute(_)) => Some((0xAD, operand)),
+        (Mnemonic::LDA, Operand::AbsoluteX(_)) => Some((0xBD, operand)),
+        (Mnemonic::LDA, Operand::AbsoluteY(_)) => Some((0xB9, operand)),
+        (Mnemonic::LDA, Operand::IndexedIndirectX(_)) => Some((0xA1, operand)),
+        (Mnemonic::LDA, Operand::IndirectIndexedY(_)) => Some((0xB1, operand)),
+        (Mnemonic::LDX, Operand::Immediate(_)) => Some((0xA2, operand)),
+        (Mnemonic::LDX, Operand::ZeroPage(_)) => Some((0xA6, operand)),
+        (Mnemonic::LDX, Operand::ZeroPageY(_)) => Some((0xB6, operand)),
+        (Mnemonic::LDX, Operand::Absolute(_)) => Some((0xAE, operand)),
+        (Mnemonic::LDX, Operand::AbsoluteY(_)) => Some((0xBE, operand)),
+        (Mnemonic::LDY, Operand::Immediate(_)) => Some((0xA0, operand)),
+        (Mnemonic::LDY, Operand::ZeroPage(_)) => Some((0xA4, operand)),
+        (Mnemonic::LDY, Operand::ZeroPageX(_)) => Some((0xB4, operand)),
+        (Mnemonic::LDY, Operand::Absolute(_)) => Some((0xAC, operand)),
+        (Mnemonic::LDY, Operand::AbsoluteX(_)) => Some((0xBC, operand)),
+        (Mnemonic::LSR, Operand::Accumulator) => Some((0x4A, operand)),
+        (Mnemonic::LSR, Operand::ZeroPage(_)) => Some((0x46, operand)),
+        (Mnemonic::LSR, Operand::ZeroPageX(_)) => Some((0x56, operand)),
+        (Mnemonic::LSR, Operand::Absolute(_)) => Some((0x4E, operand)),
+        (Mnemonic::LSR, Operand::AbsoluteX(_)) => Some((0x5E, operand)),
+        (Mnemonic::NOP, Operand::Implied) => Some((0xEA, operand)),
+        (Mnemonic::ORA, Operand::Immediate(_)) => Some((0x09, operand)),
+        (Mnemonic::ORA, Operand::ZeroPage(_)) => Some((0x05, operand)),
+        (Mnemonic::ORA, Operand::ZeroPageX(_)) => Some((0x15, operand)),
+        (Mnemonic::ORA, Operand::Absolute(_)) => Some((0x0D, operand)),
+        (Mnemonic::ORA, Operand::AbsoluteX(_)) => Some((0x1D, operand)),
+        (Mnemonic::ORA, Operand::AbsoluteY(_)) => Some((0x19, operand)),
+        (Mnemonic::ORA, Operand::IndexedIndirectX(_)) => Some((0x01, operand)),
+        (Mnemonic::ORA, Operand::IndirectIndexedY(_)) => Some((0x11, operand)),
+        (Mnemonic::PHA, Operand::Implied) => Some((0x48, operand)),
+        (Mnemonic::PHP, Operand::Implied) => Some((0x08, operand)),
+        (Mnemonic::PLA, Operand::Implied) => Some((0x68, operand)),
+        (Mnemonic::PLP, Operand::Implied) => Some((0x28, operand)),
+        (Mnemonic::ROL, Operand::Accumulator) => Some((0x2A, operand)),
+        (Mnemonic::ROL, Operand::ZeroPage(_)) => Some((0x26, operand)),
+        (Mnemonic::ROL, Operand::ZeroPageX(_)) => Some((0x36, operand)),
+        (Mnemonic::ROL, Operand::Absolute(_)) => Some((0x2E, operand)),
+        (Mnemonic::ROL, Operand::AbsoluteX(_)) => Some((0x3E, operand)),
+        (Mnemonic::ROR, Operand::Accumulator) => Some((0x6A, operand)),
+        (Mnemonic::ROR, Operand::ZeroPage(_)) => Some((0x66, operand)),
+        (Mnemonic::ROR, Operand::ZeroPageX(_)) => Some((0x76, operand)),
+        (Mnemonic::ROR, Operand::Absolute(_)) => Some((0x6E, operand)),
+        (Mnemonic::ROR, Operand::AbsoluteX(_)) => Some((0x7E, operand)),
+        (Mnemonic::RTI, Operand::Implied) => Some((0x40, operand)),
+        (Mnemonic::RTS, Operand::Implied) => Some((0x60, operand)),
+        (Mnemonic::SBC, Operand::Immediate(_)) => Some((0xE9, operand)),
+        (Mnemonic::SBC, Operand::ZeroPage(_)) => Some((0xE5, operand)),
+        (Mnemonic::SBC, Operand::ZeroPageX(_)) => Some((0xF5, operand)),
+        (Mnemonic::SBC, Operand::Absolute(_)) => Some((0xED, operand)),
+        (Mnemonic::SBC, Operand::AbsoluteX(_)) => Some((0xFD, operand)),
+        (Mnemonic::SBC, Operand::AbsoluteY(_)) => Some((0xF9, operand)),
+        (Mnemonic::SBC, Operand::IndexedIndirectX(_)) => Some((0xE1, operand)),
+        (Mnemonic::SBC, Operand::IndirectIndexedY(_)) => Some((0xF1, operand)),
+        (Mnemonic::SEC, Operand::Implied) => Some((0x38, operand)),
+        (Mnemonic::SED, Operand::Implied) => Some((0xF8, operand)),
+        (Mnemonic::SEI, Operand::Implied) => Some((0x78, operand)),
+        (Mnemonic::STA, Operand::ZeroPage(_)) => Some((0x85, operand)),
+        (Mnemonic::STA, Operand::ZeroPageX(_)) => Some((0x95, operand)),
+        (Mnemonic::STA, Operand::Absolute(_)) => Some((0x8D, operand)),
+        (Mnemonic::STA, Operand::AbsoluteX(_)) => Some((0x9D, operand)),
+        (Mnemonic::STA, Operand::AbsoluteY(_)) => Some((0x99, operand)),
+        (Mnemonic::STA, Operand::IndexedIndirectX(_)) => Some((0x81, operand)),
+        (Mnemonic::STA, Operand::IndirectIndexedY(_)) => Some((0x91, operand)),
+        (Mnemonic::STX, Operand::ZeroPage(_)) => Some((0x86, operand)),
+        (Mnemonic::STX, Operand::ZeroPageY(_)) => Some((0x96, operand)),
+        (Mnemonic::STX, Operand::Absolute(_)) => Some((0x8E, operand)),
+        (Mnemonic::STY, Operand::ZeroPage(_)) => Some((0x84, operand)),
+        (Mnemonic::STY, Operand::ZeroPageX(_)) => Some((0x94, operand)),
+        (Mnemonic::STY, Operand::Absolute(_)) => Some((0x8C, operand)),
+        (Mnemonic::TAX, Operand::Implied) => Some((0xAA, operand)),
+        (Mnemonic::TAY, Operand::Implied) => Some((0xA8, operand)),
+        (Mnemonic::TSX, Operand::Implied) => Some((0xBA, operand)),
+        (Mnemonic::TXA, Operand::Implied) => Some((0x8A, operand)),
+        (Mnemonic::TXS, Operand::Implied) => Some((0x9A, operand)),
+        (Mnemonic::TYA, Operand::Implied) => Some((0x98, operand)),
         _ => panic!("Unsupported addressing mode"), //< TODO return error
-    }.map(|code| (code, operand))
+    }
 }
 
 #[test]
@@ -637,6 +696,7 @@ fn test_parse_instruction() {
     assert_eq!(parse_instruction("ADC #$FF"), Some((0x69, Operand::Immediate(0xFF))));
     assert_eq!(parse_instruction("ADC @$20"), Some((0x65, Operand::ZeroPage(Symbol::Value(0x20)))));
     assert_eq!(parse_instruction("JMP (label)"), Some((0x6C, Operand::Indirect(Symbol::Label("label")))));
+    assert_eq!(parse_instruction("BNE rel"), Some((0xD0, Operand::Relative(Symbol::Label("rel")))));
     assert_eq!(parse_instruction("BRK"), Some((0x00, Operand::Implied)));
     assert_eq!(parse_instruction("WOT que?"), None);
 }
