@@ -61,32 +61,32 @@ fn test_assemble() {
 
     assert_eq!(assemble("
         CODE $300
-        LDX #8
+            LDX #8
         loop: ASL A ; shift A left 8 times
-        DEX
-        BNE loop
-        BRK
+            DEX
+            BNE loop
+            BRK
         ENDCODE"),
         vec![(0x300, vec![0xA2, 8, 0x0A, 0xCA, 0xD0, (-4i8) as u8, 0x00])]);
 
     assert_eq!(assemble("
         CODE $0
-        LDA #%00101010
-        JSR leading_zeroes
-        STA @$FF
-        BRK
+            LDA #%00101010
+            JSR leading_zeroes
+            STA @$FF
+            BRK
         ENDCODE
 
         CODE $200
         leading_zeroes: LDX #-8
         loop: ROL A ; rotate left 8 times
-        BCS end ; exit loop when we find the leading 1
-        INX
-        BNE loop
+            BCS end ; exit loop when we find the leading 1
+            INX
+            BNE loop
         end: TXA
-        CLC ; don't forget to clear carry after ROL sets it...
-        ADC #8 ; convert counter to number of leading zeros in A
-        RTS
+            CLC ; don't forget to clear carry after ROL sets it...
+            ADC #8 ; convert counter to number of leading zeros in A
+            RTS
         ENDCODE"),
         vec![(0, vec![0xA9, 0b00101010, 0x20, 0x00, 0x02, 0x85, 0xff, 0x00]),
             (0x200, vec![0xA2, (-8i8) as u8, 0x2A, 0xB0, 3, 0xE8, 0xD0, (-6i8) as u8, 0x8A, 0x18, 0x69, 8, 0x60])]);
@@ -242,6 +242,7 @@ fn test_parse_number() {
     assert_eq!(parse_number("%1010"), Ok(0b1010));
     assert_eq!(parse_number("1234"), Ok(1234));
     assert_eq!(parse_number("-123"), Ok(-123));
+    assert_eq!(parse_number::<i16>("-1").map(|i| i as u8), Ok(255));
     assert!(parse_number::<u16>("twenty").is_err());
 }
 
@@ -360,7 +361,7 @@ impl<'a> Operand<'a> {
             Self::Implied => 0,
             Self::Accumulator => 0,
             Self::Immediate(data) => std::mem::size_of_val(data),
-            Self::Relative(sym) => 1, // NOTE assembler must store full (2 byte) address until assembly
+            Self::Relative(_) => 1, // NOTE assembler must store full (2 byte) address until assembly
             Self::ZeroPage(sym) => sym.size(),
             Self::ZeroPageX(sym) => sym.size(),
             Self::ZeroPageY(sym) => sym.size(),
@@ -432,15 +433,58 @@ fn parse_operand(token: &str) -> Option<Operand> {
         // TODO do this more explicitly and validate value in range [-128, 255]
         parse_number::<i16>(immediate).ok().map(|i| Operand::Immediate(i as Data))
     } else if let Some(indirect) = token.strip_prefix('(') {
-        // TODO handle labels and indexing
-        let mut tokens = indirect.split(')');
-        parse_symbol(tokens.next().unwrap()).ok().map(Operand::Indirect)
-    } else {
-        // TODO handle labels and indexing
-        if let Some(token) = token.strip_prefix('@') {
-            parse_symbol(token).ok().map(Operand::ZeroPage)
+        let mut tokens = indirect.splitn(2, ')');
+        let inner = tokens.next().unwrap().trim();
+        let outer = tokens.next().unwrap().trim(); //< TODO return error if closing ) not present
+        if outer.is_empty() {
+            let mut tokens = inner.splitn(2, ',');
+            let symbol = tokens.next().unwrap().trim();
+            if let Some(index) = tokens.next().map(str::trim) {
+                if index == "X" || index == "x" {
+                    parse_symbol(symbol).ok().map(Operand::IndexedIndirectX)
+                } else {
+                    None
+                }
+            } else {
+                parse_symbol(inner).ok().map(Operand::Indirect)
+            }
+        } else if let Some(index) = outer.strip_prefix(',').map(str::trim) {
+            if index == "Y" || index == "y" {
+                parse_symbol(inner).ok().map(Operand::IndirectIndexedY)
+            } else {
+                None
+            }
         } else {
-            parse_symbol(token).ok().map(Operand::Absolute)
+            None
+        }
+    } else if let Some(token) = token.strip_prefix('@') {
+        // TODO refactor zero page and absolute processing together
+        let mut tokens = token.splitn(2, ',');
+        let symbol = parse_symbol(tokens.next().unwrap().trim()).ok()?;
+        if let Some(index) = tokens.next().map(str::trim) {
+            if index == "X" || index == "x" {
+                Some(Operand::ZeroPageX(symbol))
+            } else if index == "Y" || index == "y" {
+                Some(Operand::ZeroPageY(symbol))
+            } else {
+                None
+            }
+        } else {
+            Some(Operand::ZeroPage(symbol))
+        }
+    } else {
+        let mut tokens = token.splitn(2, ',');
+        let symbol = parse_symbol(tokens.next().unwrap().trim()).ok()?;
+        if let Some(index) = tokens.next().map(str::trim) {
+            if index == "X" || index == "x" {
+                Some(Operand::AbsoluteX(symbol))
+            } else if index == "Y" || index == "y" {
+                Some(Operand::AbsoluteY(symbol))
+            } else {
+                None
+            }
+        } else {
+            Some(Operand::Absolute(symbol))
         }
     }
 }
@@ -451,8 +495,14 @@ fn test_parse_operand() {
     assert_eq!(parse_operand("#$FF"), Some(Operand::Immediate(0xFF)));
     assert_eq!(parse_operand("#-10"), Some(Operand::Immediate((-10i8) as u8)));
     assert_eq!(parse_operand("@%1010"), Some(Operand::ZeroPage(Symbol::Value(0b1010))));
+    assert_eq!(parse_operand("@123,X"), Some(Operand::ZeroPageX(Symbol::Value(123))));
+    assert_eq!(parse_operand("@$10,Y"), Some(Operand::ZeroPageY(Symbol::Value(0x10))));
     assert_eq!(parse_operand("1024"), Some(Operand::Absolute(Symbol::Value(1024))));
+    assert_eq!(parse_operand("$FFFF, X"), Some(Operand::AbsoluteX(Symbol::Value(0xFFFF))));
+    assert_eq!(parse_operand("%0, y"), Some(Operand::AbsoluteY(Symbol::Value(0))));
     assert_eq!(parse_operand("(label)"), Some(Operand::Indirect(Symbol::Label("label"))));
+    assert_eq!(parse_operand("(label, x)"), Some(Operand::IndexedIndirectX(Symbol::Label("label"))));
+    assert_eq!(parse_operand("(label), y"), Some(Operand::IndirectIndexedY(Symbol::Label("label"))));
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

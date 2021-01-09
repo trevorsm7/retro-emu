@@ -14,24 +14,24 @@ fn main() {
     let address = 0xFF;
     let program = asm::assemble(format!("
         CODE $0
-        LDA #{}
-        JSR leading_zeroes
-        STA @{}
-        BRK
+            LDA #{}
+            JSR leading_zeroes
+            STA @{}
+            BRK
         ENDCODE
 
         CODE $200
         leading_zeroes: LDX #-8
         loop: ROL A ; rotate left 8 times
-        BCS end ; exit loop when we find the leading 1
-        INX
-        BNE loop
+            BCS end ; exit loop when we find the leading 1
+            INX
+            BNE loop
         end: TXA
-        CLC ; don't forget to clear carry after ROL sets it...
-        ADC #8 ; convert counter to number of leading zeros in A
-        RTS
-        ENDCODE", a, address).as_ref()
-    );
+            CLC ; don't forget to clear carry after ROL sets it...
+            ADC #8 ; convert counter to number of leading zeros in A
+            RTS
+        ENDCODE",
+        a, address).as_ref());
 
     println!("{:02x?}", program);
 

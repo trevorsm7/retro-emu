@@ -1062,6 +1062,7 @@ fn test_sub_borrow() {
 
 #[test]
 fn test_lda_adc_sta() {
+    use super::asm::assemble;
     use super::memory::RAM;
     use super::bus::Port;
     use std::sync::RwLock;
@@ -1075,17 +1076,23 @@ fn test_lda_adc_sta() {
     let result_addr = 16;
 
     // Add two immediate values and store result to address 16
+    let program = assemble(format!("
+        CODE 0
+            LDA #{}
+            ADC #{}
+            STA @{}
+            BRK
+        ENDCODE",
+        lhs, rhs, result_addr).as_str());
+
     let mut rom = RAM::new(512);
-    rom.write(0, 0xA9); // LDA #5
-    rom.write(1, lhs);
-    rom.write(2, 0x69); // ADC #3
-    rom.write(3, rhs);
-    rom.write(4, 0x85); // STA 16
-    rom.write(5, result_addr as u8);
-    rom.write(6, 0x00); // BRK
+    for (offset, code) in program.iter() {
+        for (i, &byte) in code.iter().enumerate() {
+            rom.write(offset + i as u16, byte);
+        }
+    }
     bus.add_port(0, Arc::new(RwLock::new(rom)));
 
-    // Execute 3 instructions
     let bus = Arc::new(bus);
     let mut cpu = CPU_6502::new(bus.clone());
     cpu.run_until_break();
@@ -1095,6 +1102,7 @@ fn test_lda_adc_sta() {
 
 #[test]
 fn test_multiplication() {
+    use super::asm::assemble;
     use super::memory::RAM;
     use super::bus::Port;
     use std::sync::RwLock;
@@ -1106,48 +1114,45 @@ fn test_multiplication() {
     // Multiplication routine from "Programming the 6502"
     let multiplier = 15;
     let multiplicand = 43;
-
     let result_addr_lo = 64;
-    let multiplier_addr = 65;
-    let multiplicand_addr = 66;
+
+    let program = assemble(format!("
+        CODE 0
+            LDA #{multiplier}
+            STA @{multiplier_addr}
+            LDA #{multiplicand}
+            STA @{multiplicand_addr}
+            JSR MULT
+            BRK
+        MULT:
+            LDA #0
+            STA @{result_addr_lo}
+            LDX #8
+        LOOP:
+            LSR @{multiplier_addr}
+            BCC NOADD
+            CLC
+            ADC @{multiplicand_addr}
+        NOADD:
+            ROR A
+            ROR @{result_addr_lo}
+            DEX
+            BNE LOOP
+            RTS
+        ENDCODE",
+        multiplier = multiplier,
+        multiplicand = multiplicand,
+        result_addr_lo = result_addr_lo,
+        multiplier_addr = 65,
+        multiplicand_addr = 66).as_str());
 
     let ram_size = 512;
     let mut ram = RAM::new(ram_size);
-    ram.write(0, 0xA9); // LDA #multiplier
-    ram.write(1, multiplier); // imm
-    ram.write(2, 0x85); // STA multiplier
-    ram.write(3, multiplier_addr); // zp
-    ram.write(4, 0xA9); // LDA #multiplicand
-    ram.write(5, multiplicand); // imm
-    ram.write(6, 0x85); // STA multiplicand
-    ram.write(7, multiplicand_addr); // zp
-    ram.write(8, 0x20); // JSR MULT
-    ram.write(9, 12); // abs lo
-    ram.write(10, 0); // abs hi
-    ram.write(11, 0x00); // BRK
-    // MULT:
-    ram.write(12, 0xA9); // LDA #0
-    ram.write(13, 0); // imm
-    ram.write(14, 0x85); // STA result_lo
-    ram.write(15, result_addr_lo); // zp
-    ram.write(16, 0xA2); // LDX #8
-    ram.write(17, 8); // imm
-    // LOOP:
-    ram.write(18, 0x46); // LSR multiplier
-    ram.write(19, multiplier_addr); // zp
-    ram.write(20, 0x90); // BCC NOADD
-    ram.write(21, (25i8 - 22i8) as u8); // rel
-    ram.write(22, 0x18); // CLC
-    ram.write(23, 0x65); // ADC multiplicand
-    ram.write(24, multiplicand_addr); // zp
-    // NOADD:
-    ram.write(25, 0x6A); // ROR A (result_hi)
-    ram.write(26, 0x66); // ROR result_lo
-    ram.write(27, result_addr_lo); // zp
-    ram.write(28, 0xCA); // DEX
-    ram.write(29, 0xD0); // BNE LOOP
-    ram.write(30, (18i8 - 31i8) as u8); // rel
-    ram.write(31, 0x60); // RTS
+    for (offset, code) in program.iter() {
+        for (i, &byte) in code.iter().enumerate() {
+            ram.write(offset + i as u16, byte);
+        }
+    }
     bus.add_port(0, Arc::new(RwLock::new(ram)));
 
     // Execute until break
@@ -1165,6 +1170,7 @@ fn test_multiplication() {
 
 #[test]
 fn test_wrapping() {
+    use super::asm::assemble;
     use super::memory::RAM;
     use super::bus::Port;
     use std::sync::RwLock;
@@ -1175,26 +1181,32 @@ fn test_wrapping() {
     let result1 = 200;
     let result2 = 201;
     let result3 = 202;
+    
+    let program = assemble(format!("
+        CODE 0
+        ; Test increment/decrement wrapping
+            LDX #$FF
+            INX
+            STX @{result1}
+            DEX
+            STX @{result2}
+        ; Test zero page indexed wrapping
+            LDA #1
+            LDX #{result3_plus_1}
+            STA @$FF, X ; -1 + (result3 + 1) = result3
+            BRK
+        ENDCODE",
+        result1 = result1,
+        result2 = result2,
+        result3_plus_1 = (result3 + 1)).as_str());
 
     let ram_size = 512;
     let mut ram = RAM::new(ram_size);
-    // Test increment/decrement wrapping
-    ram.write(0, 0xA2); // LDX #$FF
-    ram.write(1, 0xFF); // imm
-    ram.write(2, 0xE8); // INX (wrap from 255 to 0)
-    ram.write(3, 0x86); // STX result1
-    ram.write(4, result1); // zp
-    ram.write(5, 0xCA); // DEX (wrap from 0 to 255)
-    ram.write(6, 0x86); // STX result2
-    ram.write(7, result2); // zp
-    // Test zero page indexed wrapping
-    ram.write(8, 0xA9); // LDA #1
-    ram.write(9, 1); // imm
-    ram.write(10, 0xA2); // LDX #result3+1
-    ram.write(11, result3 + 1); // imm
-    ram.write(12, 0x95); // STA -1, X
-    ram.write(13, 255); // zp
-    ram.write(14, 0x00); // BRK
+    for (offset, code) in program.iter() {
+        for (i, &byte) in code.iter().enumerate() {
+            ram.write(offset + i as u16, byte);
+        }
+    }
     bus.add_port(0, Arc::new(RwLock::new(ram)));
 
     // Execute until break
