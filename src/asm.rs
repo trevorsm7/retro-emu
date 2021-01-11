@@ -1,52 +1,21 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use num_traits::{Num, FromPrimitive};
 
 type Data = u8;
 type Address = u16;
-type LabelMap<'a> = HashMap<&'a str, Address>;
-
-// TODO maybe add a Hold option instead of wrapping in Option
-enum Transition {
-    Push(Rc<RefCell<dyn LineParser>>),
-    Pop,
-}
-
-trait LineParser {
-    // TODO return Result<..., AsmError>
-    fn parse_line<'a>(&mut self, line: &'a str, labels: &mut LabelMap<'a>) -> Option<Transition>;
-}
+type LabelMap = HashMap<String, Address>;
 
 pub fn assemble(source: &str) -> Vec<(Address, Vec<Data>)> {
-    let mut labels = LabelMap::new();
-
-    let default = Rc::new(RefCell::new(DefaultParser::new()));
-
-    // TODO maybe downgrade these into Weak instead
-    let mut stack: Vec<Rc<RefCell<dyn LineParser>>> = vec![default.clone()];
+    let mut assembler = Assembler::new();
 
     // First pass: parse instructions and record labels
     for line in source.lines() {
-        // Ignore any comments following first occurence of ';'
-        let line = line.split(';').next().unwrap();
-
-        // Prase line with current state and handle state transition
-        let parser = stack.last().unwrap().clone();
-        match parser.borrow_mut().parse_line(line, &mut labels) {
-            Some(Transition::Push(next)) => stack.push(next),
-            Some(Transition::Pop) => {stack.pop();},
-            None => (),
-        };
+        assembler.parse_line(line);
     }
 
-    // TODO there must not be any remaining references to code segments before proceeding
-    assert_eq!(stack.len(), 1);
-    drop(stack); //< Need to clear stack before unwrapping Rcs (reason to use Weak instead?)
-
-    // Second pass: substitute any previously undefined labels
-    Rc::try_unwrap(default).unwrap().into_inner().assemble(&labels)
+    // Second pass: substitute labels skipped during the first pass
+    assembler.assemble()
 }
 
 #[test]
@@ -93,43 +62,59 @@ fn test_assemble() {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct DefaultParser {
-    code_segments: Vec<Rc<RefCell<CodeParser>>>,
+enum State {
+    Default,
+    Code,
 }
 
-impl DefaultParser {
+#[derive(Clone, Debug, PartialEq)]
+struct Assembler {
+    labels: LabelMap,
+    code_segments: Vec<CodeSegment>,
+    state: State,
+}
+
+impl Assembler {
     fn new() -> Self {
+        let labels = LabelMap::new();
         let code_segments = vec![];
-        Self {code_segments}
+        let state = State::Default;
+        Assembler {labels, code_segments, state}
     }
 
-    fn assemble(&mut self, labels: &LabelMap) -> Vec<(Address, Vec<Data>)> {
-        // This got really ugly after wrapping the segments in Rc<RefCell>
-        self.code_segments.drain(..).filter_map(|p| Rc::try_unwrap(p).unwrap().into_inner().assemble(&labels)).collect()
+    fn assemble(self) -> Vec<(Address, Vec<Data>)> {
+        let Assembler {labels, mut code_segments, state:_} = self;
+        code_segments.drain(..).map(|p| p.assemble(&labels)).collect()
     }
-}
 
-impl LineParser for DefaultParser {
-    fn parse_line<'a>(&mut self, line: &'a str, labels: &mut LabelMap<'a>) -> Option<Transition> {
-        // Parse blank line, directive, or instruction
-        if line.is_empty() {
-            None
-        } else if let Some(directive) = parse_directive(line) {
-            match directive {
-                Directive::Code(address) => {
-                    self.code_segments.push(Rc::new(RefCell::new(CodeParser::new(address))));
-                    Some(Transition::Push(self.code_segments.last().unwrap().clone()))
-                },
-                _ => panic!(format!("Unsupported directive {:?}", directive)),
-            }
-        } else {
-            panic!(format!("Unhandled command {}", line));
-        }
+    fn parse_line(&mut self, line: &str) {
+        // Ignore any comments following first occurence of ';'
+        let line = line.split(';').next().unwrap();
+
+        self.state = match &self.state {
+            State::Default => {
+                // Parse blank line, directive, or instruction
+                if line.is_empty() {
+                    State::Default
+                } else if let Some(directive) = parse_directive(line) {
+                    match directive {
+                        Directive::Code(address) => {
+                            self.code_segments.push(CodeSegment::new(address));
+                            State::Code
+                        },
+                        _ => panic!(format!("Unsupported directive {:?}", directive)),
+                    }
+                } else {
+                    panic!(format!("Unhandled command {}", line));
+                }
+            },
+            State::Code => self.code_segments.last_mut().unwrap().parse_line(line, &mut self.labels),
+        };
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct CodeParser {
+struct CodeSegment {
     offset: Address,
     code: Vec<Data>,
     undefined: Vec<(LabelKind, Address)>,
@@ -141,40 +126,61 @@ fn compute_relative_address(to: Address, from: Address) -> Data {
     rel as Data //< TODO make sure that negative labels convert correctly
 }
 
-impl CodeParser {
+impl CodeSegment {
     fn new(offset: Address) -> Self {
         let code = vec![];
         let undefined = vec![];
         Self {offset, code, undefined}
     }
 
-    fn assemble(mut self, labels: &LabelMap) -> Option<(Address, Vec<Data>)> {
-        // Substitute labels that were undefined in the first pass
-        for (label, position) in self.undefined {
+    fn push_instruction(&mut self, (code, operand): (u8, Operand), labels: &LabelMap) {
+        self.code.push(code);
+        match operand.get_value(labels) {
+            Ok(ValueKind::None) => (),
+            Ok(ValueKind::Single(value)) => self.code.push(value),
+            Ok(ValueKind::Double(value)) => {
+                // Push value as little endian
+                self.code.push((value & 0xFF) as Data);
+                self.code.push((value >> 8) as Data);
+            },
+            Ok(ValueKind::Relative(address)) => {
+                let from = self.offset + (self.code.len() + 1) as Address;
+                self.code.push(compute_relative_address(address, from));
+            },
+            Err(label) => {
+                let size = label.size();
+                self.undefined.push((label, self.code.len() as Address));
+                self.code.resize(self.code.len() + size, 0);
+            },
+        };
+    }
+
+    fn assemble(self, labels: &LabelMap) -> (Address, Vec<Data>) {
+        let CodeSegment {offset, mut code, undefined} = self;
+
+        for (label, position) in undefined {
             // TODO propagate still undefined labels as error
             let &address = labels.get(label.get_label()).unwrap();
             match label {
                 LabelKind::ZeroPage(_) => {
                     assert!(address < 256);
-                    self.code[position as usize] = address as Data;
+                    code[position as usize] = address as Data;
                 },
                 LabelKind::Absolute(_) => {
-                    self.code[position as usize] = (address & 0xFF) as Data;
-                    self.code[position as usize + 1] = (address >> 8) as Data;
+                    code[position as usize] = (address & 0xFF) as Data;
+                    code[position as usize + 1] = (address >> 8) as Data;
                 },
                 LabelKind::Relative(_) => {
                     let from = self.offset + position + 1;
-                    self.code[position as usize] = compute_relative_address(address, from);
+                    code[position as usize] = compute_relative_address(address, from);
                 },
             };
         }
 
-        Some((self.offset, self.code))
+        (offset, code)
     }
-}
 
-impl LineParser for CodeParser {
-    fn parse_line<'a>(&mut self, line: &'a str, labels: &mut LabelMap<'a>) -> Option<Transition> {
+    fn parse_line(&mut self, line: &str, labels: &mut LabelMap) -> State {
         // Split at ':' and set aside rightmost token as a command
         let mut tokens = line.rsplit(':');
         let command = tokens.next().unwrap().trim();
@@ -183,7 +189,7 @@ impl LineParser for CodeParser {
         for label in tokens {
             if let Some(label) = parse_label(label.trim()) {
                 let address = self.offset + self.code.len() as Address;
-                if labels.insert(label, address).is_some() {
+                if labels.insert(label.to_string(), address).is_some() {
                     panic!(format!("Label \"{}\" already exists", label));
                 }
             } else {
@@ -193,33 +199,15 @@ impl LineParser for CodeParser {
 
         // Parse blank line, directive, or instruction
         if command.is_empty() {
-            None
+            State::Code
         } else if let Some(directive) = parse_directive(command) {
             match directive {
-                Directive::EndCode => Some(Transition::Pop),
+                Directive::EndCode => State::Default, //< return to parent state
                 _ => panic!(format!("Unsupported directive {:?}", directive)),
             }
-        } else if let Some((code, operand)) = parse_instruction(command) {
-            self.code.push(code);
-            match operand.get_value(labels) {
-                Ok(ValueKind::None) => (),
-                Ok(ValueKind::Single(value)) => self.code.push(value),
-                Ok(ValueKind::Double(value)) => {
-                    // Push value as little endian
-                    self.code.push((value & 0xFF) as Data);
-                    self.code.push((value >> 8) as Data);
-                },
-                Ok(ValueKind::Relative(address)) => {
-                    let from = self.offset + (self.code.len() + 1) as Address;
-                    self.code.push(compute_relative_address(address, from));
-                },
-                Err(label) => {
-                    let size = label.size();
-                    self.undefined.push((label, self.code.len() as Address));
-                    self.code.resize(self.code.len() + size, 0);
-                },
-            };
-            None
+        } else if let Some(instruction) = parse_instruction(command) {
+            self.push_instruction(instruction, labels);
+            State::Code
         } else {
             panic!(format!("Invalid command \"{}\"", command));
         }
