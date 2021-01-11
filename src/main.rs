@@ -10,14 +10,15 @@ use bus::{Port, Bus};
 use memory::RAM;
 
 fn main() {
-    let a = 0b00010101;
-    let address = 0xFF;
-    let program = asm::assemble(format!("
+    let input = 0b00010101;
+    let (program, labels) = asm::assemble(format!("
         CODE $0
             LDA #{}
             JSR leading_zeroes
-            STA @{}
+            STA @result
             BRK
+        ; Data (TODO add BYTE directive)
+            result: BRK
         ENDCODE
 
         CODE $200
@@ -31,7 +32,7 @@ fn main() {
             ADC #8 ; convert counter to number of leading zeros in A
             RTS
         ENDCODE",
-        a, address).as_ref());
+        input).as_ref());
 
     println!("{:02x?}", program);
 
@@ -55,5 +56,5 @@ fn main() {
     let mut cpu = CPU_6502::new(bus.clone());
     cpu.run_until_break();
 
-    println!("Leading zeroes in {:08b}: {}", a, bus.read(address).unwrap());
+    println!("Leading zeroes in {:08b}: {}", input, bus.read(labels["result"]).unwrap());
 }

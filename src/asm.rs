@@ -6,7 +6,7 @@ type Data = u8;
 type Address = u16;
 type LabelMap = HashMap<String, Address>;
 
-pub fn assemble(source: &str) -> Vec<(Address, Vec<Data>)> {
+pub fn assemble(source: &str) -> (Vec<(Address, Vec<Data>)>, LabelMap) {
     let mut assembler = Assembler::new();
 
     // First pass: parse instructions and record labels
@@ -20,25 +20,31 @@ pub fn assemble(source: &str) -> Vec<(Address, Vec<Data>)> {
 
 #[test]
 fn test_assemble() {
-    assert_eq!(assemble(""),
-        vec![]);
+    use std::iter::FromIterator;
 
-    assert_eq!(assemble("
+    let (program, labels) = assemble("");
+    assert_eq!(program, vec![]);
+    assert_eq!(labels, LabelMap::new());
+
+    let (program, labels) = assemble("
         CODE 0
-        ENDCODE"),
-        vec![(0, vec![])]);
+        ENDCODE");
+    assert_eq!(program, vec![(0, vec![])]);
+    assert_eq!(labels, LabelMap::new());
 
-    assert_eq!(assemble("
+    let (program, labels) = assemble("
         CODE $300
             LDX #8
         loop: ASL A ; shift A left 8 times
             DEX
             BNE loop
             BRK
-        ENDCODE"),
-        vec![(0x300, vec![0xA2, 8, 0x0A, 0xCA, 0xD0, (-4i8) as u8, 0x00])]);
+        ENDCODE");
+    assert_eq!(program, vec![(0x300, vec![0xA2, 8, 0x0A, 0xCA, 0xD0, (-4i8) as u8, 0x00])]);
+    assert_eq!(labels, LabelMap::from_iter(vec![
+        ("loop".to_string(), 0x302)]));
 
-    assert_eq!(assemble("
+    let (program, labels) = assemble("
         CODE $0
             LDA #%00101010
             JSR leading_zeroes
@@ -56,9 +62,14 @@ fn test_assemble() {
             CLC ; don't forget to clear carry after ROL sets it...
             ADC #8 ; convert counter to number of leading zeros in A
             RTS
-        ENDCODE"),
-        vec![(0, vec![0xA9, 0b00101010, 0x20, 0x00, 0x02, 0x85, 0xff, 0x00]),
-            (0x200, vec![0xA2, (-8i8) as u8, 0x2A, 0xB0, 3, 0xE8, 0xD0, (-6i8) as u8, 0x8A, 0x18, 0x69, 8, 0x60])]);
+        ENDCODE");
+    assert_eq!(program, vec![
+        (0, vec![0xA9, 0b00101010, 0x20, 0x00, 0x02, 0x85, 0xff, 0x00]),
+        (0x200, vec![0xA2, (-8i8) as u8, 0x2A, 0xB0, 3, 0xE8, 0xD0, (-6i8) as u8, 0x8A, 0x18, 0x69, 8, 0x60])]);
+    assert_eq!(labels, LabelMap::from_iter(vec![
+        ("leading_zeroes".to_string(), 0x200),
+        ("loop".to_string(), 0x202),
+        ("end".to_string(), 0x208)]));
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,9 +93,10 @@ impl Assembler {
         Assembler {labels, code_segments, state}
     }
 
-    fn assemble(self) -> Vec<(Address, Vec<Data>)> {
+    fn assemble(self) -> (Vec<(Address, Vec<Data>)>, LabelMap) {
         let Assembler {labels, mut code_segments, state:_} = self;
-        code_segments.drain(..).map(|p| p.assemble(&labels)).collect()
+        let program = code_segments.drain(..).map(|p| p.assemble(&labels)).collect();
+        (program, labels)
     }
 
     fn parse_line(&mut self, line: &str) {

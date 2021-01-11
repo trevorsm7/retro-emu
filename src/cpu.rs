@@ -1073,17 +1073,18 @@ fn test_lda_adc_sta() {
 
     let lhs = 5;
     let rhs = 3;
-    let result_addr = 16;
 
     // Add two immediate values and store result to address 16
-    let program = assemble(format!("
+    let (program, labels) = assemble(format!("
         CODE 0
             LDA #{}
             ADC #{}
-            STA @{}
+            STA @result
             BRK
+        ; Data (TODO add BYTE directive)
+            result: BRK
         ENDCODE",
-        lhs, rhs, result_addr).as_str());
+        lhs, rhs).as_str());
 
     let mut rom = RAM::new(512);
     for (offset, code) in program.iter() {
@@ -1097,7 +1098,7 @@ fn test_lda_adc_sta() {
     let mut cpu = CPU_6502::new(bus.clone());
     cpu.run_until_break();
 
-    assert_eq!(bus.read(result_addr).unwrap(), lhs + rhs);
+    assert_eq!(bus.read(labels["result"]).unwrap(), lhs + rhs);
 }
 
 #[test]
@@ -1114,37 +1115,37 @@ fn test_multiplication() {
     // Multiplication routine from "Programming the 6502"
     let multiplier = 15;
     let multiplicand = 43;
-    let result_addr_lo = 64;
 
-    let program = assemble(format!("
+    let (program, labels) = assemble(format!("
         CODE 0
             LDA #{multiplier}
-            STA @{multiplier_addr}
+            STA @multiplier
             LDA #{multiplicand}
-            STA @{multiplicand_addr}
+            STA @multiplicand
             JSR MULT
             BRK
         MULT:
             LDA #0
-            STA @{result_addr_lo}
+            STA @result_lo
             LDX #8
         LOOP:
-            LSR @{multiplier_addr}
+            LSR @multiplier
             BCC NOADD
             CLC
-            ADC @{multiplicand_addr}
+            ADC @multiplicand
         NOADD:
             ROR A
-            ROR @{result_addr_lo}
+            ROR @result_lo
             DEX
             BNE LOOP
             RTS
+        ; Data (TODO add BYTE directive)
+            multiplier: BRK
+            multiplicand: BRK
+            result_lo: BRK
         ENDCODE",
         multiplier = multiplier,
-        multiplicand = multiplicand,
-        result_addr_lo = result_addr_lo,
-        multiplier_addr = 65,
-        multiplicand_addr = 66).as_str());
+        multiplicand = multiplicand).as_str());
 
     let ram_size = 512;
     let mut ram = RAM::new(ram_size);
@@ -1164,7 +1165,7 @@ fn test_multiplication() {
     let result = multiplicand as u16 * multiplier as u16;
     let result_lo = (result & 0xFF) as u8;
     let result_hi = (result >> 8) as u8;
-    assert_eq!(bus.read(result_addr_lo as Address).unwrap(), result_lo);
+    assert_eq!(bus.read(labels["result_lo"]).unwrap(), result_lo);
     assert_eq!(cpu.a, result_hi);
 }
 
@@ -1178,27 +1179,25 @@ fn test_wrapping() {
     let mut bus = Bus::new();
     add_jump_table(&mut bus, 0, 0, 0);
 
-    let result1 = 200;
-    let result2 = 201;
-    let result3 = 202;
-    
-    let program = assemble(format!("
+    let (program, labels) = assemble("
         CODE 0
         ; Test increment/decrement wrapping
             LDX #$FF
             INX
-            STX @{result1}
+            STX @result1
             DEX
-            STX @{result2}
+            STX @result2
         ; Test zero page indexed wrapping
             LDA #1
-            LDX #{result3_plus_1}
-            STA @$FF, X ; -1 + (result3 + 1) = result3
+            LDX #$FF ; -1
+            STA @result3_plus_1, X ; (result3 + 1) + -1 = result3
             BRK
-        ENDCODE",
-        result1 = result1,
-        result2 = result2,
-        result3_plus_1 = (result3 + 1)).as_str());
+        ; Data (TODO add BYTE directive)
+            result1: BRK
+            result2: BRK
+            result3: BRK
+            result3_plus_1:
+        ENDCODE");
 
     let ram_size = 512;
     let mut ram = RAM::new(ram_size);
@@ -1214,7 +1213,7 @@ fn test_wrapping() {
     let mut cpu = CPU_6502::new(bus.clone());
     cpu.run_until_break();
 
-    assert_eq!(bus.read(result1 as Address).unwrap(), 0);
-    assert_eq!(bus.read(result2 as Address).unwrap(), 255);
-    assert_eq!(bus.read(result3 as Address).unwrap(), 1);
+    assert_eq!(bus.read(labels["result1"]).unwrap(), 0);
+    assert_eq!(bus.read(labels["result2"]).unwrap(), 255);
+    assert_eq!(bus.read(labels["result3"]).unwrap(), 1);
 }
